@@ -17,3 +17,8 @@ build/
 
 # Logs
 *.log
+
+# AI tool configs
+.agents/
+.claude/
+.windsurf/
