@@ -3,6 +3,7 @@ import express from "express";
 import bcrypt from "bcryptjs";
 import pkg from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
+import jwt from "jsonwebtoken";
 
 const { PrismaClient } = pkg;
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
@@ -37,6 +38,37 @@ app.post("/signup", async (req, res) => {
     });
 
     res.status(201).json({ id: user.id, email: user.email });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Something went wrong" });
+  }
+});
+
+app.post("/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ error: "Email and password are required" });
+    }
+
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) {
+      return res.status(401).json({ error: "Invalid email or password" });
+    }
+
+    const passwordMatches = await bcrypt.compare(password, user.password);
+    if (!passwordMatches) {
+      return res.status(401).json({ error: "Invalid email or password" });
+    }
+
+    const token = jwt.sign(
+      { userId: user.id },
+      process.env.JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+
+    res.json({ token, email: user.email });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Something went wrong" });

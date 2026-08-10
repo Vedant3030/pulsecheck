@@ -13,3 +13,10 @@
 - Learned: .env isn't auto-loaded by Node — needed `import "dotenv/config"` at top of main.js
 - Verified: POST /signup creates a user, hashes password, returns id + email (no password in response)
 - Next: build /login endpoint with JWT tokens.
+
+## Day X — [10/06/26]
+- Built /login endpoint: bcrypt.compare for password verification, jsonwebtoken for token issuing
+- Learned: JWT tokens are signed (not encrypted) — they prove authenticity via signature, not secrecy
+- Learned: same error message for "user not found" and "wrong password" prevents email enumeration
+- Verified: POST /login returns a valid signed token for correct credentials
+- Next: build a protected route + auth middleware to verify JWT tokens on future requests.
