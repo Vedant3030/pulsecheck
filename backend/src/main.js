@@ -84,6 +84,89 @@ app.get("/me", requireAuth, async (req, res) => {
   res.json(user);
 });
 
+// CREATE a monitor
+app.post("/monitors", requireAuth, async (req, res) => {
+  try {
+    const { url, name, intervalMins } = req.body;
+
+    if (!url || !name) {
+      return res.status(400).json({ error: "url and name are required" });
+    }
+
+    const monitor = await prisma.monitor.create({
+      data: {
+        url,
+        name,
+        intervalMins: intervalMins || 5,
+        userId: req.userId,
+      },
+    });
+
+    res.status(201).json(monitor);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Something went wrong" });
+  }
+});
+
+// READ all monitors for the logged-in user
+app.get("/monitors", requireAuth, async (req, res) => {
+  try {
+    const monitors = await prisma.monitor.findMany({
+      where: { userId: req.userId },
+      orderBy: { createdAt: "desc" },
+    });
+    res.json(monitors);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Something went wrong" });
+  }
+});
+
+// UPDATE a monitor
+app.put("/monitors/:id", requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { url, name, intervalMins, isActive } = req.body;
+
+    const monitor = await prisma.monitor.findUnique({ where: { id } });
+
+    if (!monitor || monitor.userId !== req.userId) {
+      return res.status(404).json({ error: "Monitor not found" });
+    }
+
+    const updated = await prisma.monitor.update({
+      where: { id },
+      data: { url, name, intervalMins, isActive },
+    });
+
+    res.json(updated);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Something went wrong" });
+  }
+});
+
+// DELETE a monitor
+app.delete("/monitors/:id", requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const monitor = await prisma.monitor.findUnique({ where: { id } });
+
+    if (!monitor || monitor.userId !== req.userId) {
+      return res.status(404).json({ error: "Monitor not found" });
+    }
+
+    await prisma.monitor.delete({ where: { id } });
+
+    res.json({ message: "Monitor deleted" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Something went wrong" });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
 });

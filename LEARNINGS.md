@@ -28,3 +28,12 @@
 - Built protected /me route to test the middleware
 - Verified: /me fails without token, succeeds with valid token, returns correct user
 - Next: build /monitors CRUD (the core feature) — protected by this same middleware
+
+- Added Monitor model to Prisma schema (one-to-many relation with User)
+- Built full /monitors CRUD: POST, GET, PUT, DELETE — all protected by requireAuth
+- Learned: always check resource ownership (monitor.userId === req.userId) before update/delete,
+  not just that the id exists — otherwise any user could edit/delete anyone's data
+- Learned: req.params.id syntax for dynamic route segments (/monitors/:id)
+- Debugged: stale Prisma Client after schema change — fixed with explicit `npx prisma generate`
+- Verified: full CRUD cycle working via curl (create → read → update → delete → confirm empty)
+- Next: Week 1 backend is essentially complete. Move to frontend (Next.js) or worker/ping logic

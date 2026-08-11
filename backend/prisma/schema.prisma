@@ -16,4 +16,16 @@ model User {
   email     String   @unique
   password  String
   createdAt DateTime @default(now())
+  monitors Monitor[]
+}
+
+model Monitor {
+  id            String   @id @default(uuid())
+  url           String
+  name          String
+  intervalMins  Int      @default(5)
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id])
 }
