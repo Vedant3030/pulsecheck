@@ -28,4 +28,15 @@ model Monitor {
   createdAt     DateTime @default(now())
   userId        String
   user          User     @relation(fields: [userId], references: [id])
+  checks        CheckResult[]
+}
+
+model CheckResult {
+  id           String   @id @default(uuid())
+  monitorId    String
+  monitor      Monitor  @relation(fields: [monitorId], references: [id])
+  status       String   // "up" or "down"
+  statusCode   Int?
+  responseTimeMs Int?
+  checkedAt    DateTime @default(now())
 }

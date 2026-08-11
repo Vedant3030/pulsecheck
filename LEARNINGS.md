@@ -5,7 +5,7 @@
 - Built and verified first working endpoint: GET /health returns {status: "ok"}
 - Next: PostgreSQL + Prisma setup for User model
 
-## Day X — [07/06/26]
+## Day 2 — [07/06/26]
 - Built /signup endpoint: bcrypt password hashing, Prisma create, duplicate email check
 - Learned: Prisma 7 requires explicit driver adapters (@prisma/adapter-pg) — 
   `new PrismaClient()` no longer connects to Postgres automatically like older versions
@@ -14,14 +14,14 @@
 - Verified: POST /signup creates a user, hashes password, returns id + email (no password in response)
 - Next: build /login endpoint with JWT tokens.
 
-## Day X — [10/06/26]
+## Day 3 — [10/06/26]
 - Built /login endpoint: bcrypt.compare for password verification, jsonwebtoken for token issuing
 - Learned: JWT tokens are signed (not encrypted) — they prove authenticity via signature, not secrecy
 - Learned: same error message for "user not found" and "wrong password" prevents email enumeration
 - Verified: POST /login returns a valid signed token for correct credentials
 - Next: build a protected route + auth middleware to verify JWT tokens on future requests.
 
-## Day X — [11/06/26]
+## Day 4 — [11/06/26]
 - Built auth middleware (requireAuth) — verifies JWT from Authorization header
 - Learned: middleware functions have signature (req, res, next) and run before route handlers
 - Learned: middleware can attach data to `req` (e.g. req.userId) that flows to the actual route
@@ -37,3 +37,12 @@
 - Debugged: stale Prisma Client after schema change — fixed with explicit `npx prisma generate`
 - Verified: full CRUD cycle working via curl (create → read → update → delete → confirm empty)
 - Next: Week 1 backend is essentially complete. Move to frontend (Next.js) or worker/ping logic
+
+## Day 4 — [11/06/26]
+- Added CheckResult model (linked to Monitor) to track ping history
+- Built worker/ — separate Node process that pings all active monitors on an interval
+- Used Node's built-in fetch() — no extra library needed for HTTP requests
+- Learned (again): after any schema.prisma change, run BOTH migrate dev AND generate — 
+  migrate dev doesn't always regenerate the client reliably in this Prisma version
+- Verified: worker successfully checks a real URL (google.com) and saves status/response time
+- Next: refine worker to respect each monitor's individual intervalMins, then start on frontend
