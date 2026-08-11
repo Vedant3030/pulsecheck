@@ -4,6 +4,7 @@ import bcrypt from "bcryptjs";
 import pkg from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import jwt from "jsonwebtoken";
+import { requireAuth } from "./middleware/auth.js";
 
 const { PrismaClient } = pkg;
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
@@ -73,6 +74,14 @@ app.post("/login", async (req, res) => {
     console.error(err);
     res.status(500).json({ error: "Something went wrong" });
   }
+});
+
+app.get("/me", requireAuth, async (req, res) => {
+  const user = await prisma.user.findUnique({
+    where: { id: req.userId },
+    select: { id: true, email: true, createdAt: true },
+  });
+  res.json(user);
 });
 
 app.listen(PORT, () => {

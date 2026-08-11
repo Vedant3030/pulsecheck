@@ -20,3 +20,11 @@
 - Learned: same error message for "user not found" and "wrong password" prevents email enumeration
 - Verified: POST /login returns a valid signed token for correct credentials
 - Next: build a protected route + auth middleware to verify JWT tokens on future requests.
+
+## Day X — [11/06/26]
+- Built auth middleware (requireAuth) — verifies JWT from Authorization header
+- Learned: middleware functions have signature (req, res, next) and run before route handlers
+- Learned: middleware can attach data to `req` (e.g. req.userId) that flows to the actual route
+- Built protected /me route to test the middleware
+- Verified: /me fails without token, succeeds with valid token, returns correct user
+- Next: build /monitors CRUD (the core feature) — protected by this same middleware
