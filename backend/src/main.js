@@ -12,6 +12,41 @@ const prisma = new PrismaClient({ adapter });
 
 const app = express();
 const PORT = process.env.PORT || 8000;
+const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
+
+const SLUG_REGEX = /^[a-z0-9](?:[a-z0-9-]{1,30}[a-z0-9])?$/;
+
+function validatePublicSlug(slug) {
+  if (!SLUG_REGEX.test(slug)) {
+    return "Slug must be 3–32 characters: lowercase letters, numbers, hyphens";
+  }
+  return null;
+}
+
+function toMonitorStatus(latest) {
+  return latest?.status === "up" ? "up" : "down";
+}
+
+function toPublicMonitor(monitor) {
+  const latest = monitor.checks[0];
+  return {
+    id: monitor.id,
+    name: monitor.name,
+    status: toMonitorStatus(latest),
+    responseTimeMs: latest?.responseTimeMs ?? null,
+    statusCode: latest?.statusCode ?? null,
+    checkedAt: latest?.checkedAt ?? null,
+  };
+}
+
+// Allow the Next.js frontend to call this API from the browser
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", FRONTEND_URL);
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
 
 app.use(express.json()); // lets Express read JSON request bodies
 
@@ -79,9 +114,128 @@ app.post("/login", async (req, res) => {
 app.get("/me", requireAuth, async (req, res) => {
   const user = await prisma.user.findUnique({
     where: { id: req.userId },
-    select: { id: true, email: true, createdAt: true },
+    select: { id: true, email: true, createdAt: true, publicSlug: true },
   });
   res.json(user);
+});
+
+// Set or clear the public status page slug for the logged-in user
+app.put("/me/public-slug", requireAuth, async (req, res) => {
+  try {
+    const { publicSlug } = req.body;
+
+    if (publicSlug === null || publicSlug === "") {
+      const user = await prisma.user.update({
+        where: { id: req.userId },
+        data: { publicSlug: null },
+        select: { id: true, email: true, createdAt: true, publicSlug: true },
+      });
+      return res.json(user);
+    }
+
+    const slug = String(publicSlug).trim().toLowerCase();
+    const slugError = validatePublicSlug(slug);
+    if (slugError) {
+      return res.status(400).json({ error: slugError });
+    }
+
+    const taken = await prisma.user.findFirst({
+      where: { publicSlug: slug, id: { not: req.userId } },
+    });
+    if (taken) {
+      return res.status(409).json({ error: "Slug already taken" });
+    }
+
+    const user = await prisma.user.update({
+      where: { id: req.userId },
+      data: { publicSlug: slug },
+      select: { id: true, email: true, createdAt: true, publicSlug: true },
+    });
+
+    res.json(user);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Something went wrong" });
+  }
+});
+
+// PUBLIC — read-only status page (no auth)
+app.get("/status/:slug", async (req, res) => {
+  try {
+    const slug = req.params.slug.trim().toLowerCase();
+
+    const user = await prisma.user.findUnique({
+      where: { publicSlug: slug },
+      select: { id: true, publicSlug: true },
+    });
+
+    if (!user) {
+      return res.status(404).json({ error: "Status page not found" });
+    }
+
+    const monitors = await prisma.monitor.findMany({
+      where: { userId: user.id, isActive: true },
+      orderBy: { createdAt: "desc" },
+      include: {
+        checks: {
+          orderBy: { checkedAt: "desc" },
+          take: 1,
+        },
+      },
+    });
+
+    res.json({
+      slug: user.publicSlug,
+      monitors: monitors.map(toPublicMonitor),
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Something went wrong" });
+  }
+});
+
+// PUBLIC — check history for one monitor on a status page
+app.get("/status/:slug/monitors/:monitorId/checks", async (req, res) => {
+  try {
+    const slug = req.params.slug.trim().toLowerCase();
+    const { monitorId } = req.params;
+    const raw = parseInt(req.query.limit, 10);
+    const limit = Math.min(Number.isFinite(raw) ? raw : 60, 120);
+
+    const user = await prisma.user.findUnique({
+      where: { publicSlug: slug },
+      select: { id: true },
+    });
+
+    if (!user) {
+      return res.status(404).json({ error: "Status page not found" });
+    }
+
+    const monitor = await prisma.monitor.findFirst({
+      where: { id: monitorId, userId: user.id, isActive: true },
+    });
+
+    if (!monitor) {
+      return res.status(404).json({ error: "Monitor not found" });
+    }
+
+    const recentDesc = await prisma.checkResult.findMany({
+      where: { monitorId },
+      orderBy: { checkedAt: "desc" },
+      take: limit,
+      select: {
+        status: true,
+        responseTimeMs: true,
+        statusCode: true,
+        checkedAt: true,
+      },
+    });
+
+    res.json(recentDesc.reverse());
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Something went wrong" });
+  }
 });
 
 // CREATE a monitor
@@ -109,14 +263,70 @@ app.post("/monitors", requireAuth, async (req, res) => {
   }
 });
 
-// READ all monitors for the logged-in user
+// READ all monitors for the logged-in user (includes latest check status)
 app.get("/monitors", requireAuth, async (req, res) => {
   try {
     const monitors = await prisma.monitor.findMany({
       where: { userId: req.userId },
       orderBy: { createdAt: "desc" },
+      include: {
+        checks: {
+          orderBy: { checkedAt: "desc" },
+          take: 1,
+        },
+      },
     });
-    res.json(monitors);
+
+    const result = monitors.map((monitor) => {
+      const latest = monitor.checks[0];
+      return {
+        id: monitor.id,
+        name: monitor.name,
+        url: monitor.url,
+        intervalMins: monitor.intervalMins,
+        isActive: monitor.isActive,
+        createdAt: monitor.createdAt,
+        status: latest?.status === "up" ? "up" : "down",
+        responseTimeMs: latest?.responseTimeMs ?? null,
+        statusCode: latest?.statusCode ?? null,
+        checkedAt: latest?.checkedAt ?? null,
+      };
+    });
+
+    res.json(result);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Something went wrong" });
+  }
+});
+
+// READ check history for a monitor (most recent last)
+app.get("/monitors/:id/checks", requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const raw = parseInt(req.query.limit, 10);
+    const limit = Math.min(Number.isFinite(raw) ? raw : 60, 120);
+
+    const monitor = await prisma.monitor.findUnique({ where: { id } });
+
+    if (!monitor || monitor.userId !== req.userId) {
+      return res.status(404).json({ error: "Monitor not found" });
+    }
+
+    const recentDesc = await prisma.checkResult.findMany({
+      where: { monitorId: id },
+      orderBy: { checkedAt: "desc" },
+      take: limit,
+      select: {
+        status: true,
+        responseTimeMs: true,
+        statusCode: true,
+        checkedAt: true,
+      },
+    });
+
+    // Reverse so oldest is first, newest is last
+    res.json(recentDesc.reverse());
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Something went wrong" });
@@ -168,5 +378,5 @@ app.delete("/monitors/:id", requireAuth, async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+  console.log(`PulseCheck API running on http://localhost:${PORT}`);
 });

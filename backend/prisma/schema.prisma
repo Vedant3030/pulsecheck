@@ -12,11 +12,12 @@ datasource db {
 }
 
 model User {
-  id        String   @id @default(uuid())
-  email     String   @unique
-  password  String
-  createdAt DateTime @default(now())
-  monitors Monitor[]
+  id         String   @id @default(uuid())
+  email      String   @unique
+  password   String
+  publicSlug String?  @unique
+  createdAt  DateTime @default(now())
+  monitors   Monitor[]
 }
 
 model Monitor {
