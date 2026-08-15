@@ -83,6 +83,23 @@
   deleted monitors don't automatically sync with BullMQ. Next: move 
   scheduling logic into the backend API routes themselves.
 
+  Wired BullMQ scheduling into backend routes
+- Moved scheduling logic from a one-time script (worker/src/schedule.js) 
+  into the backend API itself
+- POST /monitors now calls monitorQueue.add() immediately after creating 
+  a monitor — no manual scheduling step needed
+- PUT /monitors/:id removes the old repeatable job and re-adds it if the 
+  interval changed or isActive changed — BullMQ doesn't support editing 
+  a repeat schedule in place
+- DELETE /monitors/:id removes the scheduled job alongside deleting the 
+  monitor record
+- Learned: getRepeatableJobs() + removeRepeatableByKey() — how to find 
+  and remove a specific scheduled job by a custom jobId pattern
+- Verified end-to-end: created a monitor via curl, worker started checking 
+  it automatically within its interval, with zero manual intervention
+- schedule.js retained only as a one-time backfill tool for pre-existing 
+  monitors, not the source of truth anymore
+
 
 
 

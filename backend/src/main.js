@@ -5,6 +5,7 @@ import pkg from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import jwt from "jsonwebtoken";
 import { requireAuth } from "./middleware/auth.js";
+import { monitorQueue } from "./queue.js";
 
 const { PrismaClient } = pkg;
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
@@ -256,6 +257,16 @@ app.post("/monitors", requireAuth, async (req, res) => {
       },
     });
 
+    // Schedule this monitor in BullMQ immediately
+    await monitorQueue.add(
+      "check-monitor",
+      { monitorId: monitor.id },
+      {
+        repeat: { every: monitor.intervalMins * 60 * 1000 },
+        jobId: `monitor-${monitor.id}`,
+      }
+    );
+
     res.status(201).json(monitor);
   } catch (err) {
     console.error(err);
@@ -350,6 +361,25 @@ app.put("/monitors/:id", requireAuth, async (req, res) => {
       data: { url, name, intervalMins, isActive },
     });
 
+    // Remove any existing scheduled job for this monitor first
+    const repeatableJobs = await monitorQueue.getRepeatableJobs();
+    const existingJob = repeatableJobs.find((job) => job.id === `monitor-${id}`);
+    if (existingJob) {
+      await monitorQueue.removeRepeatableByKey(existingJob.key);
+    }
+
+    // Re-add it only if still active
+    if (updated.isActive) {
+      await monitorQueue.add(
+        "check-monitor",
+        { monitorId: updated.id },
+        {
+          repeat: { every: updated.intervalMins * 60 * 1000 },
+          jobId: `monitor-${updated.id}`,
+        }
+      );
+    }
+
     res.json(updated);
   } catch (err) {
     console.error(err);
@@ -369,6 +399,13 @@ app.delete("/monitors/:id", requireAuth, async (req, res) => {
     }
 
     await prisma.monitor.delete({ where: { id } });
+
+    // Remove its scheduled job too
+    const repeatableJobs = await monitorQueue.getRepeatableJobs();
+    const existingJob = repeatableJobs.find((job) => job.id === `monitor-${id}`);
+    if (existingJob) {
+      await monitorQueue.removeRepeatableByKey(existingJob.key);
+    }
 
     res.json({ message: "Monitor deleted" });
   } catch (err) {
