@@ -62,3 +62,36 @@
   backend fundamentals were already solid
 - Next: enforce per-monitor intervalMins in worker (currently global 60s 
   regardless of each monitor's setting), then email alerts
+
+## Day 6 — BullMQ + Redis (per-monitor intervals)
+- Set up Upstash (managed Redis, free tier) — avoided native Windows Redis 
+  install pain entirely
+- Learned: BullMQ repeatable jobs — each monitor scheduled at ITS OWN 
+  intervalMins, not one global loop checking everything at the same rate
+- Learned: jobId in BullMQ prevents duplicate schedules if a scheduler 
+  script reruns
+- Learned: Queue (adds jobs) and Worker (processes jobs) are separate 
+  concerns in BullMQ
+- Verified real per-interval scheduling, including correct handling of a 
+  genuine failed check (logged as "down" correctly)
+- Fixed cascade delete bug: deleting a Monitor failed because Postgres's 
+  RESTRICT constraint blocked it while CheckResult rows still referenced it
+- Learned: RESTRICT (default) blocks parent deletion if children exist; 
+  CASCADE auto-deletes children when parent is deleted
+- Fixed: added onDelete: Cascade to CheckResult's relation in schema.prisma
+- Identified design gap: schedule.js is a one-time script — new/edited/
+  deleted monitors don't automatically sync with BullMQ. Next: move 
+  scheduling logic into the backend API routes themselves.
+
+
+
+
+## General patterns learned
+- Terminal basics: pwd (where am I), cd .. (up one level), cd foldername 
+  (into a subfolder) — run pwd whenever confused before cd-ing
+- Git hygiene: always check/create .gitignore BEFORE first npm install or 
+  git add .; run git status before every git add .; verify secrets never 
+  tracked with `git ls-files | grep .env`
+- git check-ignore -v <file> — debug why something isn't being ignored
+- "Failed to connect... could not connect to server" on curl almost always 
+  means the relevant server process isn't running

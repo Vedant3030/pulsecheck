@@ -35,7 +35,7 @@ model Monitor {
 model CheckResult {
   id           String   @id @default(uuid())
   monitorId    String
-  monitor      Monitor  @relation(fields: [monitorId], references: [id])
+  monitor      Monitor  @relation(fields: [monitorId], references: [id], onDelete: Cascade)
   status       String   // "up" or "down"
   statusCode   Int?
   responseTimeMs Int?
