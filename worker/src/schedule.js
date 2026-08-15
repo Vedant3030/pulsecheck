@@ -13,13 +13,10 @@ async function scheduleAllMonitors() {
   console.log(`Scheduling ${monitors.length} monitor(s)...`);
 
   for (const monitor of monitors) {
-    await monitorQueue.add(
-      "check-monitor",
-      { monitorId: monitor.id },
-      {
-        repeat: { every: monitor.intervalMins * 60 * 1000 },
-        jobId: `monitor-${monitor.id}`, // prevents duplicate schedules for the same monitor
-      }
+    await monitorQueue.upsertJobScheduler(
+      `monitor-${monitor.id}`,
+      { every: monitor.intervalMins * 60 * 1000 },
+      { name: "check-monitor", data: { monitorId: monitor.id } }
     );
     console.log(`  Scheduled "${monitor.name}" every ${monitor.intervalMins} min`);
   }

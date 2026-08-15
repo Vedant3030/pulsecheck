@@ -258,13 +258,10 @@ app.post("/monitors", requireAuth, async (req, res) => {
     });
 
     // Schedule this monitor in BullMQ immediately
-    await monitorQueue.add(
-      "check-monitor",
-      { monitorId: monitor.id },
-      {
-        repeat: { every: monitor.intervalMins * 60 * 1000 },
-        jobId: `monitor-${monitor.id}`,
-      }
+    await monitorQueue.upsertJobScheduler(
+      `monitor-${monitor.id}`,
+      { every: monitor.intervalMins * 60 * 1000 },
+      { name: "check-monitor", data: { monitorId: monitor.id } }
     );
 
     res.status(201).json(monitor);
@@ -362,22 +359,22 @@ app.put("/monitors/:id", requireAuth, async (req, res) => {
     });
 
     // Remove any existing scheduled job for this monitor first
-    const repeatableJobs = await monitorQueue.getRepeatableJobs();
-    const existingJob = repeatableJobs.find((job) => job.id === `monitor-${id}`);
-    if (existingJob) {
-      await monitorQueue.removeRepeatableByKey(existingJob.key);
-    }
+    // const repeatableJobs = await monitorQueue.getRepeatableJobs();
+    // const existingJob = repeatableJobs.find((job) => job.id === `monitor-${id}`);
+    // if (existingJob) {
+    //   await monitorQueue.removeRepeatableByKey(existingJob.key);
+    // }
 
     // Re-add it only if still active
     if (updated.isActive) {
-      await monitorQueue.add(
-        "check-monitor",
-        { monitorId: updated.id },
-        {
-          repeat: { every: updated.intervalMins * 60 * 1000 },
-          jobId: `monitor-${updated.id}`,
-        }
+      await monitorQueue.upsertJobScheduler(
+        `monitor-${updated.id}`,
+        { every: updated.intervalMins * 60 * 1000 },
+        { name: "check-monitor", data: { monitorId: updated.id } }
       );
+    } else {
+      // If deactivated, remove the schedule entirely
+      await monitorQueue.removeJobScheduler(`monitor-${updated.id}`);
     }
 
     res.json(updated);
@@ -401,11 +398,7 @@ app.delete("/monitors/:id", requireAuth, async (req, res) => {
     await prisma.monitor.delete({ where: { id } });
 
     // Remove its scheduled job too
-    const repeatableJobs = await monitorQueue.getRepeatableJobs();
-    const existingJob = repeatableJobs.find((job) => job.id === `monitor-${id}`);
-    if (existingJob) {
-      await monitorQueue.removeRepeatableByKey(existingJob.key);
-    }
+    await monitorQueue.removeJobScheduler(`monitor-${id}`);
 
     res.json({ message: "Monitor deleted" });
   } catch (err) {
