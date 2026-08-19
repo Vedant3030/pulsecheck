@@ -1,5 +1,5 @@
 import "dotenv/config";
-import pkg from "../../backend/node_modules/@prisma/client/index.js";
+import pkg from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { monitorQueue } from "./queue.js";
 

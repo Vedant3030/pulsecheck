@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { Worker } from "bullmq";
-import pkg from "../../backend/node_modules/@prisma/client/index.js";
+import pkg from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { connection } from "./queue.js";
 import { Resend } from "resend";

@@ -114,6 +114,71 @@
   → email sent via Resend → confirmed delivered → found in spam → marked 
   not spam
 
+## Day 9 — Dockerizing the backend
+- Wrote first Dockerfile: node:22-slim base, COPY package*.json + npm install 
+  first (layer caching), then COPY rest of code
+- Learned: RUN npm install alone doesn't generate Prisma Client — must 
+  explicitly add RUN npx prisma generate in the Dockerfile too (same lesson 
+  as local dev, now applied to containers)
+- Learned: COPY prisma ./prisma must happen BEFORE npx prisma generate, 
+  since generate reads schema.prisma
+- Debugged: Docker's --env-file does NOT strip quotes from values the way 
+  Node's dotenv does — removed all quotes from .env files to work in both 
+  contexts
+- Learned: localhost inside a container refers to the container itself, 
+  not the host machine — fixed DATABASE_URL using host.docker.internal 
+  (Docker Desktop's special DNS name for reaching the host)
+- Debugged port conflicts caused by old stopped/leftover containers still 
+  holding a port — docker ps -a, docker rm to clean up
+- Verified: full signup/login flow working against a Dockerized backend 
+  container
+
+## Day 10 — Dockerizing the worker
+- Learned: cross-folder relative imports (worker importing backend's 
+  generated Prisma Client) don't work in Docker — each container only 
+  has access to its own build context
+- Fixed by giving worker its own copy of prisma/schema.prisma and its own 
+  generated Prisma Client (@prisma/client import instead of a relative path)
+- Tradeoff noted: schema now duplicated in backend/ and worker/ — must be 
+  kept in sync manually until a cleaner shared-package or Compose-volume 
+  solution is set up
+- Verified: worker container running independently, processing real 
+  BullMQ jobs and writing CheckResults
+
+## Day 11 — Dockerizing the frontend
+- Learned: Next.js NEXT_PUBLIC_* env vars are baked in at BUILD time, not 
+  runtime (since that code runs in the browser, not on a server) — can't 
+  use --env-file at docker run time like backend/worker
+- Fixed using Docker ARG + ENV in the Dockerfile, passed via 
+  --build-arg at docker build time
+- Hit a transient network error (ECONNRESET) pulling npm packages during 
+  build — resolved simply by retrying; Docker's layer cache made the 
+  retry much faster
+- Verified: frontend container serving the app on :3000, fully functional 
+  login/dashboard against the backend
+
+## Day 12 — Docker Compose (tying it all together)
+- Learned: Compose creates a shared network where services reach each 
+  other by SERVICE NAME (e.g. postgres, backend) instead of localhost or 
+  host.docker.internal — eliminates the whole class of connection-string 
+  confusion hit while dockerizing individual services
+- Added postgres as a Compose service (containerized DB for this 
+  environment) with a named volume (pgdata) to persist data across restarts
+- Debugged: DATABASE_URL must point to the postgres service name on its 
+  INTERNAL port (5432), not the host-mapped port (5433)
+- Debugged: special characters in a password (@) must be URL-encoded 
+  (%40) when used inside a connection string URL — otherwise the URL 
+  parser misreads where the password ends and the host begins
+- Learned: docker compose exec <service> <command> runs a one-off command 
+  inside an already-running container — used this to run 
+  npx prisma migrate deploy against the fresh containerized Postgres 
+  (migrate deploy = production-safe version of migrate dev, applies 
+  existing migrations without prompting)
+- Verified: full stack (postgres + backend + worker + frontend) running 
+  together via a single `docker compose up --build` command, complete 
+  signup → login → create monitor → worker checks it → alert flow working 
+  end-to-end inside Docker
+
 ## General patterns learned
 - Terminal basics: pwd (where am I), cd .. (up one level), cd foldername 
   (into a subfolder) — run pwd whenever confused before cd-ing
@@ -130,3 +195,11 @@
 - When copying example commands with placeholders (YOUR_TOKEN, THE_ID), 
   always double check every placeholder was replaced with a real value 
   before running
+- Docker images are frozen snapshots — code changes don't auto-apply; 
+  rebuild the image (docker build / docker compose up --build) to pick up 
+  new code. Fine to develop normally with npm run dev day-to-day and only 
+  rebuild Docker when specifically testing the containerized version or 
+  before deploying
+- When a Docker build fails with a network-related error (ECONNRESET, 
+  timeout awaiting response headers), it's usually transient — just retry 
+  the same command; Docker's build cache makes retries faster
