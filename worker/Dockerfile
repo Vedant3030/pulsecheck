@@ -9,4 +9,6 @@ RUN npx prisma generate
 
 COPY . .
 
+EXPOSE 10000
+
 CMD ["node", "src/worker.js"]

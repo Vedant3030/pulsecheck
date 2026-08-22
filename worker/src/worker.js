@@ -4,6 +4,7 @@ import pkg from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { connection } from "./queue.js";
 import { Resend } from "resend";
+import express from "express";
 
 const { PrismaClient } = pkg;
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
@@ -104,5 +105,10 @@ const worker = new Worker(
 worker.on("failed", (job, err) => {
   console.error(`Job ${job.id} failed:`, err.message);
 });
+
+const app = express();
+app.get("/", (req, res) => res.send("Worker is running"));
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log(`Worker health server listening on port ${PORT}`));
 
 console.log("BullMQ worker started. Listening for monitor-check jobs...");
