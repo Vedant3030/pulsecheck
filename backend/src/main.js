@@ -13,7 +13,14 @@ const prisma = new PrismaClient({ adapter });
 
 const app = express();
 const PORT = process.env.PORT || 8000;
-const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
+
+// Support multiple allowed origins (local dev + production), comma-separated
+// via FRONTEND_URL env var, e.g. "http://localhost:3000,https://pulsecheck-frontend.onrender.com"
+const allowedOrigins = (
+  process.env.FRONTEND_URL || "http://localhost:3000"
+)
+  .split(",")
+  .map((url) => url.trim());
 
 const SLUG_REGEX = /^[a-z0-9](?:[a-z0-9-]{1,30}[a-z0-9])?$/;
 
@@ -42,7 +49,10 @@ function toPublicMonitor(monitor) {
 
 // Allow the Next.js frontend to call this API from the browser
 app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", FRONTEND_URL);
+  const origin = req.headers.origin;
+  if (allowedOrigins.includes(origin)) {
+    res.header("Access-Control-Allow-Origin", origin);
+  }
   res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
   if (req.method === "OPTIONS") return res.sendStatus(204);
@@ -357,13 +367,6 @@ app.put("/monitors/:id", requireAuth, async (req, res) => {
       where: { id },
       data: { url, name, intervalMins, isActive },
     });
-
-    // Remove any existing scheduled job for this monitor first
-    // const repeatableJobs = await monitorQueue.getRepeatableJobs();
-    // const existingJob = repeatableJobs.find((job) => job.id === `monitor-${id}`);
-    // if (existingJob) {
-    //   await monitorQueue.removeRepeatableByKey(existingJob.key);
-    // }
 
     // Re-add it only if still active
     if (updated.isActive) {
