@@ -31,4 +31,6 @@ export interface WaveformStripProps {
   checkedAt: Date | string | null;
   /** When set, fetches check history via the public status API. */
   publicSlug?: string;
+  /** Presentation only; monitor data and requests remain identical. */
+  variant?: "clinical" | "dashboard";
 }

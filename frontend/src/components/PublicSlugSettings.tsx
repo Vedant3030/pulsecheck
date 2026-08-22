@@ -84,18 +84,21 @@ export function PublicSlugSettings() {
 
   if (loading) {
     return (
-      <section className="mb-10 rounded-lg border border-neutral-800 bg-neutral-900/50 p-6">
-        <p className="text-sm text-neutral-500">Loading public page settings…</p>
+      <section className="manage-panel mb-10 p-6">
+        <p className="text-sm text-muted">Loading public page settings…</p>
       </section>
     );
   }
 
   return (
-    <section className="mb-10 rounded-lg border border-neutral-800 bg-neutral-900/50 p-6">
-      <h2 className="mb-1 text-sm font-medium text-neutral-300">
-        Public status page
+    <section className="manage-panel mb-10 p-6">
+      <div className="mb-4 flex items-center justify-between border-b border-grid pb-3">
+      <h2 className="text-xs tracking-widest text-phosphor uppercase">
+        Public signal
       </h2>
-      <p className="mb-4 text-xs text-neutral-500">
+      <span className="text-[10px] tracking-wider text-muted uppercase">Visitor feed</span>
+      </div>
+      <p className="mb-4 text-xs text-muted">
         Share a read-only ICU monitor wall. Only active monitors are shown; URLs
         are hidden from visitors.
       </p>
@@ -106,7 +109,7 @@ export function PublicSlugSettings() {
             Page slug
           </label>
           <div className="flex">
-            <span className="flex items-center rounded-l-md border border-r-0 border-neutral-700 bg-neutral-800 px-3 text-sm text-neutral-500">
+            <span className="flex items-center border border-r-0 border-phosphor-dim bg-bg-strip px-3 text-sm text-muted">
               /status/
             </span>
             <input
@@ -121,13 +124,13 @@ export function PublicSlugSettings() {
               title="3–32 chars: lowercase letters, numbers, hyphens"
             />
           </div>
-          <p className="mt-1 text-xs text-neutral-500">
-            Example: <code className="text-neutral-400">acme-ops</code>
+          <p className="mt-1 text-xs text-muted">
+            Example: <code className="text-phosphor-dim">acme-ops</code>
           </p>
         </div>
 
         {error && (
-          <p className="text-sm text-red-400" role="alert">
+          <p className="text-sm text-alarm" role="alert">
             {error}
           </p>
         )}
@@ -159,13 +162,13 @@ export function PublicSlugSettings() {
       </form>
 
       {publicUrl && (
-        <p className="mt-4 text-xs text-neutral-400">
+        <p className="mt-4 text-xs text-muted">
           Live at{" "}
           <a
             href={publicUrl}
             target="_blank"
             rel="noopener noreferrer"
-            className="text-neutral-200 underline-offset-2 hover:underline"
+            className="text-phosphor underline-offset-2 hover:underline"
           >
             {publicUrl}
           </a>

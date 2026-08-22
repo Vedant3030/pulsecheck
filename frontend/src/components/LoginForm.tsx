@@ -5,6 +5,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { login } from "@/lib/api";
 import { isAuthenticated, setAuth } from "@/lib/auth";
+import { PasswordField } from "@/components/ui/PasswordField";
 
 export function LoginForm() {
   const router = useRouter();
@@ -40,17 +41,10 @@ export function LoginForm() {
 
   return (
     <>
-      {sessionExpired && (
-        <p className="mb-4 text-xs tracking-wider text-amber">
-          Session expired — please sign in again.
-        </p>
-      )}
-
-      <form onSubmit={handleSubmit} className="flex flex-col gap-5">
-        <div className="flex flex-col gap-1.5">
-          <label htmlFor="email" className="clinical-label">
-            Operator ID
-          </label>
+      {sessionExpired && <p className="auth-feedback auth-feedback-info mb-4">Your session expired. Please sign in again.</p>}
+      <form onSubmit={handleSubmit} className="auth-form">
+        <div className="auth-field">
+          <label htmlFor="email">Email address</label>
           <input
             id="email"
             type="email"
@@ -58,47 +52,15 @@ export function LoginForm() {
             required
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            className="clinical-input"
+            className=""
             placeholder="you@example.com"
           />
         </div>
-
-        <div className="flex flex-col gap-1.5">
-          <label htmlFor="password" className="clinical-label">
-            Access Key
-          </label>
-          <input
-            id="password"
-            type="password"
-            autoComplete="current-password"
-            required
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            className="clinical-input"
-            placeholder="••••••••"
-          />
-        </div>
-
-        {error && (
-          <p className="alarm-blink text-xs tracking-wider text-alarm text-alarm-glow">
-            {error}
-          </p>
-        )}
-
-        <button type="submit" disabled={loading} className="clinical-button">
-          {loading ? "Authenticating…" : "Sign In"}
-        </button>
+        <PasswordField id="password" label="Password" value={password} onChange={setPassword} autoComplete="current-password" />
+        {error && <p className="auth-feedback auth-feedback-error" role="alert">{error}</p>}
+        <button type="submit" disabled={loading} className="auth-submit">{loading ? "Signing in…" : "Sign in"}</button>
       </form>
-
-      <p className="mt-6 text-center text-xs text-muted">
-        No account?{" "}
-        <Link
-          href="/signup"
-          className="text-phosphor-dim underline-offset-2 hover:text-phosphor hover:underline"
-        >
-          Register operator
-        </Link>
-      </p>
+      <p className="auth-footer">New to PulseCheck? <Link href="/signup">Create an account</Link></p>
     </>
   );
 }

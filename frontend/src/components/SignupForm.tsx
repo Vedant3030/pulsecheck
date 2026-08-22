@@ -5,6 +5,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { login, signup } from "@/lib/api";
 import { isAuthenticated, setAuth } from "@/lib/auth";
+import { PasswordField } from "@/components/ui/PasswordField";
 
 export function SignupForm() {
   const router = useRouter();
@@ -51,11 +52,9 @@ export function SignupForm() {
 
   return (
     <>
-      <form onSubmit={handleSubmit} className="flex flex-col gap-5">
-        <div className="flex flex-col gap-1.5">
-          <label htmlFor="signup-email" className="clinical-label">
-            Operator ID
-          </label>
+      <form onSubmit={handleSubmit} className="auth-form">
+        <div className="auth-field">
+          <label htmlFor="signup-email">Email address</label>
           <input
             id="signup-email"
             type="email"
@@ -63,65 +62,16 @@ export function SignupForm() {
             required
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            className="clinical-input"
+            className=""
             placeholder="you@example.com"
           />
         </div>
-
-        <div className="flex flex-col gap-1.5">
-          <label htmlFor="signup-password" className="clinical-label">
-            Access Key
-          </label>
-          <input
-            id="signup-password"
-            type="password"
-            autoComplete="new-password"
-            required
-            minLength={8}
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            className="clinical-input"
-            placeholder="••••••••"
-          />
-        </div>
-
-        <div className="flex flex-col gap-1.5">
-          <label htmlFor="signup-confirm" className="clinical-label">
-            Confirm Access Key
-          </label>
-          <input
-            id="signup-confirm"
-            type="password"
-            autoComplete="new-password"
-            required
-            minLength={8}
-            value={confirmPassword}
-            onChange={(e) => setConfirmPassword(e.target.value)}
-            className="clinical-input"
-            placeholder="••••••••"
-          />
-        </div>
-
-        {error && (
-          <p className="alarm-blink text-xs tracking-wider text-alarm text-alarm-glow">
-            {error}
-          </p>
-        )}
-
-        <button type="submit" disabled={loading} className="clinical-button">
-          {loading ? "Registering…" : "Create Account"}
-        </button>
+        <PasswordField id="signup-password" label="Password" value={password} onChange={setPassword} autoComplete="new-password" minLength={8} hint="Use at least 8 characters." />
+        <PasswordField id="signup-confirm" label="Confirm password" value={confirmPassword} onChange={setConfirmPassword} autoComplete="new-password" minLength={8} />
+        {error && <p className="auth-feedback auth-feedback-error" role="alert">{error}</p>}
+        <button type="submit" disabled={loading} className="auth-submit">{loading ? "Creating account…" : "Create account"}</button>
       </form>
-
-      <p className="mt-6 text-center text-xs text-muted">
-        Already registered?{" "}
-        <Link
-          href="/login"
-          className="text-phosphor-dim underline-offset-2 hover:text-phosphor hover:underline"
-        >
-          Sign in
-        </Link>
-      </p>
+      <p className="auth-footer">Already have an account? <Link href="/login">Sign in</Link></p>
     </>
   );
 }

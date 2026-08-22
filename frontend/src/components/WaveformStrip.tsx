@@ -6,9 +6,8 @@ import {
   BASELINE,
   BEAT_WIDTH,
   FALLBACK_BEAT_PATH,
-  SEGMENT_WIDTH,
   VIEW_HEIGHT,
-  buildHistoryPath,
+  buildHistoryWaveform,
   fallbackBeatTransform,
   latencyToAmplitude,
   scrollDurationForShift,
@@ -29,10 +28,12 @@ export function WaveformStrip({
   statusCode,
   checkedAt,
   publicSlug,
+  variant = "clinical",
 }: WaveformStripProps) {
   const isUp = status === "up";
   const awaitingCheck = !isUp && checkedAt == null;
   const [checks, setChecks] = useState<CheckResult[]>([]);
+  const [expanded, setExpanded] = useState(false);
 
   // Refetch history when parent poll updates checkedAt (new ping landed)
   useEffect(() => {
@@ -57,14 +58,26 @@ export function WaveformStrip({
     };
   }, [monitorId, checkedAt, awaitingCheck, publicSlug]);
 
-  const historyPath = useMemo(() => buildHistoryPath(checks), [checks]);
+  const history = useMemo(() => buildHistoryWaveform(checks), [checks]);
   const hasHistory = checks.length >= 2;
-  const historyWidth = Math.max(checks.length * SEGMENT_WIDTH, BEAT_WIDTH);
+  const historyWidth = history.width;
 
   const scrollShift = hasHistory ? historyWidth : BEAT_WIDTH;
   const duration = scrollDurationForShift(scrollShift, responseTimeMs);
+  // Render enough tiles to cover the entire viewBox while the first tile scrolls out.
+  const historyTileCount = Math.ceil(800 / historyWidth) + 2;
   const amplitude = latencyToAmplitude(responseTimeMs);
   const statusLabel = awaitingCheck ? "INIT" : status.toUpperCase();
+  const successfulChecks = checks.filter((check) => check.status === "up");
+  const uptime = checks.length
+    ? Math.round((successfulChecks.length / checks.length) * 100)
+    : null;
+  const averageLatency = successfulChecks.length
+    ? Math.round(
+        successfulChecks.reduce((total, check) => total + (check.responseTimeMs ?? 0), 0) /
+          successfulChecks.length,
+      )
+    : null;
 
   const strokeColor = awaitingCheck
     ? "var(--color-phosphor-dim)"
@@ -74,12 +87,24 @@ export function WaveformStrip({
 
   return (
     <article
-      className={`panel-border bg-bg-strip p-4 ${isUp ? "" : awaitingCheck ? "strip-pending" : "strip-alarm"}`}
+      className={`${variant === "dashboard" ? "dashboard-monitor" : "monitor-strip-button panel-border bg-bg-strip"} p-4 ${isUp ? "" : awaitingCheck ? "strip-pending" : "strip-alarm"}`}
       aria-label={`${name} monitor strip`}
+      role="button"
+      tabIndex={0}
+      aria-expanded={expanded}
+      onClick={() => setExpanded((value) => !value)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          setExpanded((value) => !value);
+        }
+      }}
     >
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-          <h2 className="text-sm tracking-wider text-phosphor uppercase">
+          <h2
+            className={`text-sm tracking-wider ${variant === "dashboard" ? "font-semibold text-slate-50" : "text-phosphor uppercase"}`}
+          >
             {name}
           </h2>
           <span
@@ -87,7 +112,7 @@ export function WaveformStrip({
               isUp
                 ? "text-xs tracking-widest text-phosphor"
                 : awaitingCheck
-                  ? "text-xs tracking-widest text-amber"
+                ? "text-xs tracking-widest text-amber"
                   : "alarm-blink-text text-xs tracking-widest text-alarm text-alarm-glow"
             }
           >
@@ -134,32 +159,27 @@ export function WaveformStrip({
               opacity="0.5"
             />
           ) : hasHistory ? (
-            <g
-              className="wave-scroll"
-              style={
-                {
-                  "--wave-duration": `${duration}s`,
-                  "--wave-shift": `${-historyWidth}px`,
-                } as React.CSSProperties
-              }
-            >
-              <path
-                d={historyPath}
-                fill="none"
-                stroke={strokeColor}
-                strokeWidth="1.75"
-                vectorEffect="non-scaling-stroke"
-                className={!isUp ? "alarm-blink-line" : undefined}
+            <g>
+              <animateTransform
+                attributeName="transform"
+                type="translate"
+                from="0 0"
+                to={`${-historyWidth} 0`}
+                dur={`${duration}s`}
+                repeatCount="indefinite"
               />
-              <path
-                d={historyPath}
-                transform={`translate(${historyWidth}, 0)`}
-                fill="none"
-                stroke={strokeColor}
-                strokeWidth="1.75"
-                vectorEffect="non-scaling-stroke"
-                className={!isUp ? "alarm-blink-line" : undefined}
-              />
+              {Array.from({ length: historyTileCount }, (_, index) => (
+                <path
+                  key={index}
+                  d={history.path}
+                  transform={`translate(${(index - 1) * historyWidth}, 0)`}
+                  fill="none"
+                  stroke={strokeColor}
+                  strokeWidth="1.75"
+                  vectorEffect="non-scaling-stroke"
+                  className={!isUp ? "alarm-blink-line" : undefined}
+                />
+              ))}
             </g>
           ) : isUp ? (
             <g
@@ -196,6 +216,31 @@ export function WaveformStrip({
           )}
         </svg>
       </div>
+
+      {expanded && (
+        <div className="monitor-detail grid gap-4 text-xs sm:grid-cols-4">
+          <div>
+            <p className="vital-label">History</p>
+            <p className="mt-1 text-phosphor">{checks.length || "—"} recent checks</p>
+          </div>
+          <div>
+            <p className="vital-label">Availability</p>
+            <p className="mt-1 text-phosphor">
+              {uptime == null ? "Awaiting data" : `${uptime}% in visible history`}
+            </p>
+          </div>
+          <div>
+            <p className="vital-label">Average latency</p>
+            <p className="mt-1 text-amber">
+              {averageLatency == null ? "—" : `${averageLatency} ms`}
+            </p>
+          </div>
+          <div className="sm:text-right">
+            <p className="vital-label">Inspection</p>
+            <p className="mt-1 text-muted">Click again to collapse</p>
+          </div>
+        </div>
+      )}
     </article>
   );
 }

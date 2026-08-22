@@ -5,6 +5,11 @@ export const BASELINE = 40;
 export const VIEW_HEIGHT = 80;
 export const BEAT_WIDTH = 120;
 
+export interface HistoryWaveform {
+  path: string;
+  width: number;
+}
+
 /** Map latency → spike height (slow = weaker pulse). */
 export function latencyToAmplitude(responseTimeMs: number | null): number {
   const ms = responseTimeMs ?? 500;
@@ -37,18 +42,37 @@ export function latencyToDuration(responseTimeMs: number | null): number {
 }
 
 /**
- * Build one continuous SVG path from check history.
- * Each check = one segment; UP draws a QRS spike scaled by latency, DOWN stays flat.
- * Checks must be ordered oldest → newest (most recent last).
+ * Build a continuous SVG path from timestamped check history.
+ *
+ * Horizontal distance is derived from the elapsed time between checks, normalized
+ * against the monitor's typical (median) check gap. This keeps a 1-minute monitor
+ * and a 5-minute monitor equally readable while preserving meaningful late/missed
+ * check gaps. Checks must be ordered oldest → newest (most recent last).
  */
-export function buildHistoryPath(checks: CheckResult[]): string {
-  if (checks.length === 0) return "";
+export function buildHistoryWaveform(checks: CheckResult[]): HistoryWaveform {
+  if (checks.length === 0) return { path: "", width: BEAT_WIDTH };
+
+  const gaps = checks
+    .slice(1)
+    .map((check, index) => new Date(check.checkedAt).getTime() - new Date(checks[index].checkedAt).getTime())
+    .filter((gap) => Number.isFinite(gap) && gap > 0)
+    .sort((a, b) => a - b);
+  const typicalGap = gaps.length ? gaps[Math.floor(gaps.length / 2)] : 0;
+  const widths = checks.map((check, index) => {
+    if (index === 0 || typicalGap === 0) return SEGMENT_WIDTH;
+    const elapsed = new Date(check.checkedAt).getTime() - new Date(checks[index - 1].checkedAt).getTime();
+    // Corrupt/out-of-order timestamps fall back to the normal segment width.
+    if (!Number.isFinite(elapsed) || elapsed <= 0) return SEGMENT_WIDTH;
+    // Retain timing information without allowing one delayed job to create a blank screen.
+    return SEGMENT_WIDTH * Math.min(Math.max(elapsed / typicalGap, 0.55), 3);
+  });
 
   const parts: string[] = [];
+  let x = 0;
 
   for (let i = 0; i < checks.length; i++) {
-    const x = i * SEGMENT_WIDTH;
-    const xEnd = x + SEGMENT_WIDTH;
+    const segmentWidth = widths[i];
+    const xEnd = x + segmentWidth;
     const check = checks[i];
 
     if (i === 0) {
@@ -57,25 +81,29 @@ export function buildHistoryPath(checks: CheckResult[]): string {
 
     if (check.status !== "up") {
       parts.push(`L ${xEnd} ${BASELINE}`);
+      x = xEnd;
       continue;
     }
 
     const amp = latencyToAmplitude(check.responseTimeMs);
     const peak = BASELINE - 32 * amp;
     const trough = BASELINE + 15 * amp;
-    const mid = x + SEGMENT_WIDTH * 0.45;
+    const mid = x + segmentWidth * 0.45;
+    const spikeWidth = Math.min(segmentWidth * 0.18, 8);
 
     parts.push(
-      `L ${mid - 8} ${BASELINE}`,
-      `L ${mid - 2} ${BASELINE - 2 * amp}`,
+      `L ${mid - spikeWidth} ${BASELINE}`,
+      `L ${mid - spikeWidth / 4} ${BASELINE - 2 * amp}`,
       `L ${mid} ${peak}`,
-      `L ${mid + 2} ${trough}`,
-      `L ${mid + 8} ${BASELINE}`,
+      `L ${mid + spikeWidth / 4} ${trough}`,
+      `L ${mid + spikeWidth} ${BASELINE}`,
       `L ${xEnd} ${BASELINE}`,
     );
+
+    x = xEnd;
   }
 
-  return parts.join(" ");
+  return { path: parts.join(" "), width: Math.max(x, BEAT_WIDTH) };
 }
 
 /** Decorative fallback beat when history hasn't loaded yet. */
