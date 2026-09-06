@@ -7,5 +7,5 @@ interface AuthLayoutProps {
 }
 
 export function AuthLayout({ title, description, children }: AuthLayoutProps) {
-  return <main className="auth-page"><section className="auth-card"><AppBrand /><div className="auth-copy"><h1>{title}</h1><p>{description}</p></div>{children}</section></main>;
+  return <main className="auth-page bulb-pulse-wave animate min-h-screen flex items-center justify-center"><section className="auth-card phosphor-grid-pulse animate"><AppBrand /><div className="auth-copy"><h1>{title}</h1><p>{description}</p></div>{children}</section></main>;
 }

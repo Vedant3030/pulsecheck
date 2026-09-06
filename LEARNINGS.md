@@ -179,6 +179,33 @@
   signup → login → create monitor → worker checks it → alert flow working 
   end-to-end inside Docker
 
+  ## Day 13 — Deployed to Render (temporary, pre-VPS)
+- Used Render (PaaS) as a no-card-needed alternative to a VPS, to get a 
+  real live deployment while sorting out a card for Oracle Cloud later
+- Deployed backend, worker, and frontend as separate Render Web Services, 
+  each built from its existing Dockerfile — no Docker changes needed
+- Render's free tier has no "Background Worker" option — worked around 
+  this by adding a minimal Express health endpoint to the worker so it 
+  qualifies as a free "Web Service" while still running its real BullMQ logic
+- Ran `npx prisma migrate deploy` against Render's fresh Postgres database 
+  to apply existing migrations (same pattern as the local Docker Compose 
+  Postgres setup)
+- Learned: NEXT_PUBLIC_* frontend env vars must be set correctly on Render 
+  BEFORE deploying, since they're baked in at Docker build time, not runtime
+- Debugged a real CORS issue: backend only allowed localhost as an origin — 
+  fixed by supporting multiple comma-separated origins via FRONTEND_URL
+- Learned: browsers cache CORS preflight (OPTIONS) responses, which can 
+  make an already-fixed server appear broken in the browser — clearing 
+  cache / using Incognito rules this out when debugging
+- Learned: Render free tier cold-starts (spins down after inactivity) can 
+  sometimes surface as confusing browser errors (like CORS) rather than 
+  a clear timeout — worth "waking up" a service with a plain request 
+  before debugging further
+- Confirmed: full production flow working end-to-end — signup, login, 
+  create monitor, live worker checks, all on public URLs
+- Workflow going forward: git push triggers automatic redeploy on Render — 
+  no manual Docker commands needed for normal changes
+
 ## General patterns learned
 - Terminal basics: pwd (where am I), cd .. (up one level), cd foldername 
   (into a subfolder) — run pwd whenever confused before cd-ing

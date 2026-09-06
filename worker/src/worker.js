@@ -62,10 +62,13 @@ async function checkMonitor(monitorId) {
     console.log(`[${monitor.name}] FAILED - ${err.message}`);
   }
 
-  // Only alert if the status actually changed from the last check
+  // Alert if status changed from the last check, OR if this is the very
+  // first check and the site is already down (user should know immediately)
+  const isFirstCheck = !previousCheck;
   const statusChanged = previousCheck && previousCheck.status !== newStatus;
+  const shouldAlert = statusChanged || (isFirstCheck && newStatus === "down");
 
-  if (statusChanged) {
+  if (shouldAlert) {
     await sendAlertEmail(monitor, newStatus);
   }
 }

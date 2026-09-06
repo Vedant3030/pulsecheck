@@ -13,6 +13,7 @@ import {
   scrollDurationForShift,
 } from "@/lib/waveform";
 import type { CheckResult, WaveformStripProps } from "@/types/monitor";
+import { useReducedMotion } from "@/hooks/useReducedMotion";
 
 function formatCheckedAt(value: Date | string | null): string {
   if (value == null) return "---";
@@ -28,12 +29,13 @@ export function WaveformStrip({
   statusCode,
   checkedAt,
   publicSlug,
-  variant = "clinical",
+  variant = "dashboard",
 }: WaveformStripProps) {
   const isUp = status === "up";
   const awaitingCheck = !isUp && checkedAt == null;
   const [checks, setChecks] = useState<CheckResult[]>([]);
   const [expanded, setExpanded] = useState(false);
+  const reducedMotion = useReducedMotion();
 
   // Refetch history when parent poll updates checkedAt (new ping landed)
   useEffect(() => {
@@ -50,7 +52,7 @@ export function WaveformStrip({
         if (!cancelled) setChecks(data);
       })
       .catch(() => {
-        // Keep last known history on transient errors
+        // Keep last known history on transient errors - do not set state
       });
 
     return () => {
@@ -74,9 +76,9 @@ export function WaveformStrip({
     : null;
   const averageLatency = successfulChecks.length
     ? Math.round(
-        successfulChecks.reduce((total, check) => total + (check.responseTimeMs ?? 0), 0) /
-          successfulChecks.length,
-      )
+      successfulChecks.reduce((total, check) => total + (check.responseTimeMs ?? 0), 0) /
+        successfulChecks.length,
+    )
     : null;
 
   const strokeColor = awaitingCheck
@@ -103,7 +105,7 @@ export function WaveformStrip({
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <h2
-            className={`text-sm tracking-wider ${variant === "dashboard" ? "font-semibold text-slate-50" : "text-phosphor uppercase"}`}
+            className={"text-sm tracking-wider " + (variant === "dashboard" ? "font-semibold text-[var(--text-main)]" : "text-phosphor uppercase")}
           >
             {name}
           </h2>
@@ -112,7 +114,7 @@ export function WaveformStrip({
               isUp
                 ? "text-xs tracking-widest text-phosphor"
                 : awaitingCheck
-                ? "text-xs tracking-widest text-amber"
+                  ? "text-xs tracking-widest text-amber"
                   : "alarm-blink-text text-xs tracking-widest text-alarm text-alarm-glow"
             }
           >
@@ -130,6 +132,9 @@ export function WaveformStrip({
           <span className="text-muted">{formatCheckedAt(checkedAt)}</span>
           {hasHistory && (
             <span className="text-[10px] text-muted">{checks.length} pts</span>
+          )}
+          {!hasHistory && !awaitingCheck && (
+            <span className="text-[10px] text-muted">No history yet</span>
           )}
         </div>
       </div>
@@ -160,14 +165,16 @@ export function WaveformStrip({
             />
           ) : hasHistory ? (
             <g>
-              <animateTransform
-                attributeName="transform"
-                type="translate"
-                from="0 0"
-                to={`${-historyWidth} 0`}
-                dur={`${duration}s`}
-                repeatCount="indefinite"
-              />
+              {!reducedMotion && (
+                <animateTransform
+                  attributeName="transform"
+                  type="translate"
+                  from="0 0"
+                  to={`${-historyWidth} 0`}
+                  dur={`${duration}s`}
+                  repeatCount="indefinite"
+                />
+              )}
               {Array.from({ length: historyTileCount }, (_, index) => (
                 <path
                   key={index}
@@ -184,12 +191,10 @@ export function WaveformStrip({
           ) : isUp ? (
             <g
               className="wave-scroll"
-              style={
-                {
-                  "--wave-duration": `${duration}s`,
-                  "--wave-shift": `${-BEAT_WIDTH}px`,
-                } as React.CSSProperties
-              }
+              style={{
+                "--wave-duration": `${duration}s`,
+                "--wave-shift": `${-BEAT_WIDTH}px`,
+              } as React.CSSProperties}
             >
               {Array.from({ length: 24 }, (_, i) => (
                 <path
