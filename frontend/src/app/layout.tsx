@@ -1,3 +1,4 @@
+import Link from "next/link";
 import type { Metadata } from "next";
 import { JetBrains_Mono } from "next/font/google";
 import "./globals.css";
@@ -13,12 +14,12 @@ export const metadata: Metadata = {
   description: "Uptime monitoring — ICU-style status wall",
 };
 
+// Dark is the default. Light applies only when the user explicitly chose it.
 const themeInitScript = `
 (function () {
   try {
     var stored = localStorage.getItem("pulsecheck-theme");
-    var prefersLight = window.matchMedia("(prefers-color-scheme: light)").matches;
-    if (stored === "light" || (!stored && prefersLight)) {
+    if (stored === "light") {
       document.documentElement.classList.add("light");
     }
   } catch (e) {}
@@ -35,7 +36,16 @@ export default function RootLayout({
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
       </head>
-      <body className="min-h-screen antialiased">{children}</body>
+      <body className="flex min-h-screen flex-col antialiased">
+        <div className="flex-1">{children}</div>
+        <footer className="border-t border-grid bg-bg-panel px-5 py-4 text-center text-xs text-[var(--text-muted)]">
+          <span>PulseCheck — uptime monitoring</span>
+          <span className="mx-2">·</span>
+          <Link href="/privacy" className="underline-offset-4 hover:text-[var(--text-main)] hover:underline">Privacy</Link>
+          <span className="mx-2">·</span>
+          <Link href="/terms" className="underline-offset-4 hover:text-[var(--text-main)] hover:underline">Terms</Link>
+        </footer>
+      </body>
     </html>
   );
 }

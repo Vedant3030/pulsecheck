@@ -1,16 +1,21 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { getEmail } from "@/lib/auth";
 import { useMonitors } from "@/hooks/useMonitors";
+import { updateMonitor } from "@/lib/api";
 import { LiveClock } from "@/components/LiveClock";
 import { LogoutButton } from "@/components/LogoutButton";
 import { MonitorBayEmpty } from "@/components/MonitorBayEmpty";
 import { WaveformStrip } from "@/components/WaveformStrip";
 import { ThemeToggle } from "@/components/ThemeToggle";
+import { LayoutDashboard, Radio, Clock3, Settings } from "lucide-react";
 import { MonitorBaySkeleton } from "@/components/ui/Skeleton";
 import { AppBrand } from "@/components/ui/AppBrand";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { AmbientCanvas } from "@/components/AmbientCanvas";
+import { EmailVerificationBanner } from "@/components/EmailVerificationBanner";
 
 const POLL_INTERVAL_MS = 10_000;
 type Filter = "all" | "up" | "down" | "paused";
@@ -29,6 +34,29 @@ export function MonitorWall() {
     refetchOnFocus: true,
   });
   const [filter, setFilter] = useState<Filter>("all");
+  const [togglingId, setTogglingId] = useState<string | null>(null);
+
+  const handleToggleExpiry = useCallback(
+    async (monitor: { id: string; name: string; url: string; intervalMins: number; isActive: boolean }, field: "sslMonitoringEnabled" | "domainMonitoringEnabled", next: boolean) => {
+      setTogglingId(monitor.id);
+      try {
+        // Keep api thin — PUT already handles extra booleans idempotently (upsert is no-op if unchanged)
+        await updateMonitor(monitor.id, {
+          name: monitor.name,
+          url: monitor.url,
+          intervalMins: monitor.intervalMins,
+          isActive: monitor.isActive,
+          [field]: next,
+        } as unknown as Parameters<typeof updateMonitor>[1]);
+        await refetch();
+      } catch {
+        // useMonitors will surface error on next poll; keep UI responsive
+      } finally {
+        setTogglingId(null);
+      }
+    },
+    [refetch]
+  );
 
   const summary = useMemo(() => {
     const active = monitors.filter((monitor) => monitor.isActive);
@@ -64,17 +92,18 @@ export function MonitorWall() {
   const hasIncident = summary.downCount > 0;
 
 return (
-     <div className="dashboard-shell flex bulb-pulse-wave animate">
+     <div className="dashboard-shell flex bulb-pulse-wave animate relative">
+        <AmbientCanvas />
         <aside className="dashboard-sidebar fixed inset-y-0 left-0 z-20 flex flex-col p-4">
           <div className="mb-9 px-2">
             <AppBrand tagline="Uptime monitoring" />
           </div>
          <nav aria-label="Primary navigation" className="space-y-1">
-           <Link href="/" className="dashboard-nav-link dashboard-nav-link-active"><span aria-hidden>▦</span> Overview</Link>
-           <a href="#monitors" className="dashboard-nav-link"><span aria-hidden>◫</span> Monitors</a>
-           <a href="#activity" className="dashboard-nav-link"><span aria-hidden>◷</span> Activity</a>
-           <Link href="/manage" className="dashboard-nav-link"><span aria-hidden>⚙</span> Settings</Link>
-         </nav>
+            <Link href="/" className="dashboard-nav-link dashboard-nav-link-active"><LayoutDashboard className="h-4 w-4 shrink-0" aria-hidden /> Overview</Link>
+            <a href="#monitors" className="dashboard-nav-link"><Radio className="h-4 w-4 shrink-0" aria-hidden /> Monitors</a>
+            <a href="#activity" className="dashboard-nav-link"><Clock3 className="h-4 w-4 shrink-0" aria-hidden /> Activity</a>
+            <Link href="/manage" className="dashboard-nav-link"><Settings className="h-4 w-4 shrink-0" aria-hidden /> Settings</Link>
+          </nav>
          <div className="dashboard-panel mt-auto p-3">
            <div className="flex items-center gap-2 text-xs font-medium text-[var(--text-soft)]"><span className={`status-dot ${hasIncident ? "status-dot-down" : "status-dot-up"}`} />System status</div>
            <p className={`mt-2 text-sm font-semibold ${hasIncident ? "text-alarm" : "text-phosphor"}`}>{hasIncident ? "Attention required" : "Operational"}</p>
@@ -107,7 +136,8 @@ return (
          </header>
 
 <main className="mx-auto max-w-7xl px-5 py-6 md:px-8">
-           {error && <section role="alert" aria-live="polite" className="mb-5 flex items-center justify-between gap-3 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"><span>Unable to refresh monitor data: {error}</span><button type="button" onClick={() => refetch()} className="shrink-0 text-xs font-medium text-red-300 underline underline-offset-2 transition hover:text-red-100">Retry</button></section>}
+            <EmailVerificationBanner />
+            {error && <section role="alert" aria-live="polite" className="mb-5 flex items-center justify-between gap-3 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"><span>Unable to refresh monitor data: {error}</span><button type="button" onClick={() => refetch()} className="shrink-0 text-xs font-medium text-red-300 underline underline-offset-2 transition hover:text-red-100">Retry</button></section>}
            {loading ? <MonitorBaySkeleton count={4} /> : monitors.length === 0 ? <MonitorBayEmpty /> : <>
              <section aria-label="System health summary" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
                <div className="dashboard-stat"><p className="dashboard-stat-label">System health</p><div className="mt-3 flex items-center gap-2"><span className={`status-dot ${hasIncident ? "status-dot-down" : "status-dot-up"}`} /><p className={`dashboard-stat-value text-lg ${hasIncident ? "text-alarm" : "text-phosphor"}`}>{hasIncident ? "Incident" : "Healthy"}</p></div><p className="mt-2 text-xs text-[var(--text-muted)]">{hasIncident ? `${summary.downCount} monitor needs attention` : "All active checks passing"}</p></div>
@@ -118,7 +148,7 @@ return (
              </section>
              {hasIncident && <section className="mt-5 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3"><p className="text-sm font-medium text-red-200">Active incident detected</p><p className="mt-1 text-xs text-red-300">{summary.downCount} active monitor{summary.downCount === 1 ? " is" : "s are"} reporting an unhealthy check. Filter by “Down” to inspect affected services.</p></section>}
              <div className="mt-6 grid gap-6 xl:grid-cols-[minmax(0,1fr)_18rem]">
-               <section id="monitors" className="dashboard-panel min-w-0 p-4 md:p-5"><div className="flex flex-wrap items-start justify-between gap-4"><div><h2 className="text-base font-semibold text-[var(--text-main)]">Monitors</h2><p className="mt-1 text-xs text-[var(--text-muted)]">Latest check and response-time history for each endpoint</p></div><div className="flex flex-wrap gap-2" aria-label="Monitor filters">{FILTERS.map((value) => <button key={value} type="button" className="dashboard-filter" aria-pressed={filter === value} onClick={() => setFilter(value)}>{value[0].toUpperCase() + value.slice(1)}</button>)}</div></div><div className="mt-5 space-y-3">{filteredMonitors.length ? filteredMonitors.map((monitor) => <WaveformStrip key={monitor.id} monitorId={monitor.id} name={monitor.name} status={monitor.status} responseTimeMs={monitor.responseTimeMs} statusCode={monitor.statusCode} checkedAt={monitor.checkedAt} variant="dashboard" />) : <div className="rounded-lg border border-dashed border-grid px-5 py-10 text-center"><p className="text-sm font-medium text-[var(--text-main)]">No monitors in this view</p><button type="button" className="mt-3 text-xs font-medium text-phosphor hover:underline" onClick={() => setFilter("all")}>Show all monitors</button></div>}</div></section>
+                               <section id="monitors" className="dashboard-panel min-w-0 p-4 md:p-5"><div className="flex flex-wrap items-start justify-between gap-4"><div><h2 className="text-base font-semibold text-[var(--text-main)]">Monitors</h2><p className="mt-1 text-xs text-[var(--text-muted)]">Latest check and response-time history for each endpoint</p></div><Tabs value={filter} onValueChange={(v) => setFilter(v as Filter)} aria-label="Monitor filters"><TabsList>{FILTERS.map((value) => <TabsTrigger key={value} value={value}>{value[0].toUpperCase() + value.slice(1)}</TabsTrigger>)}</TabsList></Tabs></div><div className="mt-5 space-y-3">{filteredMonitors.length ? filteredMonitors.map((monitor) => <WaveformStrip key={monitor.id} monitorId={monitor.id} name={monitor.name} status={monitor.status} responseTimeMs={monitor.responseTimeMs} statusCode={monitor.statusCode} checkedAt={monitor.checkedAt} variant="dashboard" sslMonitoringEnabled={monitor.sslMonitoringEnabled} certExpiresAt={monitor.certExpiresAt} sslAlertStage={monitor.sslAlertStage} domainMonitoringEnabled={monitor.domainMonitoringEnabled} domainExpiresAt={monitor.domainExpiresAt} domainAlertStage={monitor.domainAlertStage} onToggleSsl={(v) => handleToggleExpiry(monitor, "sslMonitoringEnabled", v)} onToggleDomain={(v) => handleToggleExpiry(monitor, "domainMonitoringEnabled", v)} isToggling={togglingId === monitor.id} />) : <div className="rounded-lg border border-dashed border-grid px-5 py-10 text-center"><p className="text-sm font-medium text-[var(--text-main)]">No monitors in this view</p><button type="button" className="mt-3 text-xs font-medium text-phosphor hover:underline" onClick={() => setFilter("all")}>Show all monitors</button></div>}</div></section>
                <aside id="activity" className="dashboard-panel h-fit p-4 md:p-5"><h2 className="text-base font-semibold text-[var(--text-main)]">Recent activity</h2><p className="mt-1 text-xs text-[var(--text-muted)]">Most recently checked services</p><div className="mt-4">{recentMonitors.map((monitor) => { const isDown = monitor.status === "down" && monitor.checkedAt != null; return <div key={monitor.id} className="activity-item flex gap-3 py-3 first:pt-0"><span className={"status-dot mt-1.5 shrink-0 " + (isDown ? "status-dot-down" : monitor.checkedAt == null ? "status-dot-pending" : "status-dot-up")} /><div className="min-w-0 flex-1"><div className="flex justify-between gap-2"><p className="truncate text-xs font-medium text-[var(--text-main)]">{monitor.name}</p><time className="shrink-0 text-xs text-[var(--text-muted)]">{formatTime(monitor.checkedAt)}</time></div><p className={"mt-1 text-xs " + (isDown ? "text-alarm" : "text-[var(--text-muted)]")}>{monitor.checkedAt == null ? "Waiting for first check" : isDown ? "Check failed" : `${monitor.responseTimeMs ?? "—"} ms · HTTP ${monitor.statusCode ?? "—"}`}</p></div></div>; })}</div><Link href="/manage" className="mt-3 block rounded-md border border-grid px-3 py-2 text-center text-xs font-medium text-[var(--text-main)] transition hover:border-phosphor hover:bg-bg-strip">Add or manage monitors</Link></aside>
              </div>
            </>}

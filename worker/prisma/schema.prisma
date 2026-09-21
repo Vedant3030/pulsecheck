@@ -12,32 +12,129 @@ datasource db {
 }
 
 model User {
-  id         String   @id @default(uuid())
-  email      String   @unique
-  password   String
-  publicSlug String?  @unique
-  createdAt  DateTime @default(now())
-  monitors   Monitor[]
+  id                     String                   @id @default(uuid())
+  email                  String                   @unique
+  password               String
+  publicSlug             String?                  @unique
+  emailVerified          Boolean                  @default(false)
+  createdAt              DateTime                 @default(now())
+  monitors               Monitor[]
+  heartbeatMonitors      HeartbeatMonitor[]
+  passwordResetTokens    PasswordResetToken[]
+  emailVerificationTokens EmailVerificationToken[]
+}
+
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+}
+
+model EmailVerificationToken {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
+enum ExpiryAlertStage {
+  NONE
+  WARNED_30D
+  WARNED_14D
+  WARNED_7D
+  EXPIRED
+  UNSUPPORTED
 }
 
 model Monitor {
-  id            String   @id @default(uuid())
-  url           String
-  name          String
-  intervalMins  Int      @default(5)
-  isActive      Boolean  @default(true)
-  createdAt     DateTime @default(now())
-  userId        String
-  user          User     @relation(fields: [userId], references: [id])
-  checks        CheckResult[]
+  id                      String            @id @default(uuid())
+  url                     String
+  name                    String
+  intervalMins            Int               @default(5)
+  isActive                Boolean           @default(true)
+  createdAt               DateTime          @default(now())
+  userId                  String
+  user                    User              @relation(fields: [userId], references: [id])
+  checks                  CheckResult[]
+  assertions              MonitorAssertion[]
+  sslMonitoringEnabled    Boolean           @default(false)
+  certExpiresAt           DateTime?
+  lastSslCheckAt          DateTime?
+  sslAlertStage           ExpiryAlertStage  @default(NONE)
+  domainMonitoringEnabled Boolean           @default(false)
+  domainExpiresAt         DateTime?
+  lastDomainCheckAt       DateTime?
+  domainAlertStage        ExpiryAlertStage  @default(NONE)
 }
 
 model CheckResult {
-  id           String   @id @default(uuid())
-  monitorId    String
-  monitor      Monitor  @relation(fields: [monitorId], references: [id], onDelete: Cascade)
-  status       String   // "up" or "down"
-  statusCode   Int?
-  responseTimeMs Int?
-  checkedAt    DateTime @default(now())
+  id               String   @id @default(uuid())
+  monitorId        String
+  monitor          Monitor  @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+  status           String // "up" or "down"
+  statusCode       Int?
+  responseTimeMs   Int?
+  checkedAt        DateTime @default(now())
+  assertionResults Json?
+}
+
+model MonitorAssertion {
+  id            String            @id @default(cuid())
+  monitorId     String
+  monitor       Monitor           @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+  type          AssertionType
+  field         String?
+  operator      AssertionOperator
+  expectedValue String
+  createdAt     DateTime          @default(now())
+}
+
+enum AssertionType {
+  STATUS_CODE
+  RESPONSE_TIME
+  BODY_CONTAINS
+  JSON_FIELD_EQUALS
+}
+
+enum AssertionOperator {
+  EQUALS
+  CONTAINS
+  LESS_THAN
+  GREATER_THAN
+}
+
+enum HeartbeatStatus {
+  PENDING
+  UP
+  DOWN
+}
+
+model HeartbeatMonitor {
+  id                      String          @id @default(cuid())
+  userId                  String
+  user                    User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name                    String
+  slug                    String          @unique
+  expectedIntervalSeconds Int
+  gracePeriodSeconds      Int
+  lastPingAt              DateTime?
+  status                  HeartbeatStatus @default(PENDING)
+  isActive                Boolean         @default(true)
+  createdAt               DateTime        @default(now())
+  updatedAt               DateTime        @updatedAt
+  checks                  HeartbeatCheck[]
+}
+
+model HeartbeatCheck {
+  id                 String          @id @default(cuid())
+  heartbeatMonitorId String
+  heartbeatMonitor   HeartbeatMonitor @relation(fields: [heartbeatMonitorId], references: [id], onDelete: Cascade)
+  receivedAt         DateTime        @default(now())
+  status             HeartbeatStatus
 }

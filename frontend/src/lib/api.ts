@@ -1,4 +1,10 @@
-import type { CheckResult, Monitor } from "@/types/monitor";
+import type {
+  AssertionOperator,
+  AssertionType,
+  CheckResult,
+  Monitor,
+  MonitorAssertion,
+} from "@/types/monitor";
 import type { PublicStatusPage, UserProfile } from "@/types/status";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -164,6 +170,91 @@ export async function deleteMonitor(id: string): Promise<void> {
   if (!res.ok) {
     throw new Error(await parseError(res));
   }
+}
+
+export interface AssertionInput {
+  type: AssertionType;
+  field?: string | null;
+  operator: AssertionOperator;
+  expectedValue: string;
+}
+
+export async function fetchAssertions(
+  monitorId: string,
+): Promise<MonitorAssertion[]> {
+  const res = await apiFetch(`/monitors/${monitorId}/assertions`);
+  await ensureAuthed(res);
+
+  if (!res.ok) {
+    throw new Error(await parseError(res));
+  }
+
+  return (await res.json()) as MonitorAssertion[];
+}
+
+export async function createAssertion(
+  monitorId: string,
+  input: AssertionInput,
+): Promise<MonitorAssertion> {
+  const res = await apiFetch(`/monitors/${monitorId}/assertions`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  await ensureAuthed(res);
+
+  if (!res.ok) {
+    throw new Error(await parseError(res));
+  }
+
+  return (await res.json()) as MonitorAssertion;
+}
+
+export async function deleteAssertion(
+  monitorId: string,
+  assertionId: string,
+): Promise<void> {
+  const res = await apiFetch(
+    `/monitors/${monitorId}/assertions/${assertionId}`,
+    { method: "DELETE" },
+  );
+  await ensureAuthed(res);
+
+  if (!res.ok) {
+    throw new Error(await parseError(res));
+  }
+}
+
+export async function forgotPassword(email: string): Promise<{ message: string }> {
+  const res = await fetch(`${API_URL}/forgot-password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  if (!res.ok) throw new Error(await parseError(res));
+  return (await res.json()) as { message: string };
+}
+
+export async function resetPassword(token: string, newPassword: string): Promise<{ message: string }> {
+  const res = await fetch(`${API_URL}/reset-password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token, newPassword }),
+  });
+  if (!res.ok) throw new Error(await parseError(res));
+  return (await res.json()) as { message: string };
+}
+
+export async function verifyEmail(token: string): Promise<{ message: string }> {
+  const res = await fetch(`${API_URL}/verify-email?token=${encodeURIComponent(token)}`);
+  if (!res.ok) throw new Error(await parseError(res));
+  return (await res.json()) as { message: string };
+}
+
+export async function resendVerification(): Promise<{ message: string }> {
+  const res = await apiFetch("/resend-verification", { method: "POST" });
+  await ensureAuthed(res);
+  if (!res.ok) throw new Error(await parseError(res));
+  return (await res.json()) as { message: string };
 }
 
 export async function fetchMe(): Promise<UserProfile> {

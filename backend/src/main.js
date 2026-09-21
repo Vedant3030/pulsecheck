@@ -4,15 +4,38 @@ import bcrypt from "bcryptjs";
 import pkg from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import jwt from "jsonwebtoken";
+import rateLimit from "express-rate-limit";
 import { requireAuth } from "./middleware/auth.js";
-import { monitorQueue } from "./queue.js";
+import { monitorQueue, sslDomainQueue } from "./queue.js";
+import heartbeatsRouter from "./routes/heartbeats.js";
+import heartbeatPingRouter from "./routes/heartbeatPing.js";
+import { generateRawToken, hashToken } from "./lib/tokens.js";
+import { sendPasswordResetEmail, sendVerificationEmail } from "./lib/email.js";
 
 const { PrismaClient } = pkg;
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma = new PrismaClient({ adapter });
 
 const app = express();
+app.set("trust proxy", 1);
 const PORT = process.env.PORT || 8000;
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many attempts, please try again in 15 minutes." },
+});
+
+const resendVerificationLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 3,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.userId || req.ip,
+  message: { error: "Too many verification requests, please try again later." },
+});
 
 // Support multiple allowed origins (local dev + production), comma-separated
 // via FRONTEND_URL env var, e.g. "http://localhost:3000,https://pulsecheck-frontend.onrender.com"
@@ -61,11 +84,15 @@ app.use((req, res, next) => {
 
 app.use(express.json()); // lets Express read JSON request bodies
 
+// Heartbeat routes (ADDITIVE — do not touch existing Monitor/Check routes)
+app.use("/api/heartbeats", heartbeatsRouter);
+app.use("/api/heartbeat", heartbeatPingRouter);
+
 app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
-app.post("/signup", async (req, res) => {
+app.post("/signup", authLimiter, async (req, res) => {
   try {
     const { email, password } = req.body;
 
@@ -84,6 +111,18 @@ app.post("/signup", async (req, res) => {
       data: { email, password: hashedPassword },
     });
 
+    // Send verification email (soft-fail — don't block signup)
+    try {
+      const raw = generateRawToken();
+      const tokenHash = hashToken(raw);
+      await prisma.emailVerificationToken.create({
+        data: { userId: user.id, tokenHash, expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000) },
+      });
+      await sendVerificationEmail(user.email, raw);
+    } catch (e) {
+      console.error("Failed to send verification email:", e.message);
+    }
+
     res.status(201).json({ id: user.id, email: user.email });
   } catch (err) {
     console.error(err);
@@ -91,7 +130,7 @@ app.post("/signup", async (req, res) => {
   }
 });
 
-app.post("/login", async (req, res) => {
+app.post("/login", authLimiter, async (req, res) => {
   try {
     const { email, password } = req.body;
 
@@ -125,7 +164,7 @@ app.post("/login", async (req, res) => {
 app.get("/me", requireAuth, async (req, res) => {
   const user = await prisma.user.findUnique({
     where: { id: req.userId },
-    select: { id: true, email: true, createdAt: true, publicSlug: true },
+    select: { id: true, email: true, createdAt: true, publicSlug: true, emailVerified: true },
   });
   res.json(user);
 });
@@ -139,7 +178,7 @@ app.put("/me/public-slug", requireAuth, async (req, res) => {
       const user = await prisma.user.update({
         where: { id: req.userId },
         data: { publicSlug: null },
-        select: { id: true, email: true, createdAt: true, publicSlug: true },
+        select: { id: true, email: true, createdAt: true, publicSlug: true, emailVerified: true },
       });
       return res.json(user);
     }
@@ -158,15 +197,106 @@ app.put("/me/public-slug", requireAuth, async (req, res) => {
     }
 
     const user = await prisma.user.update({
-      where: { id: req.userId },
-      data: { publicSlug: slug },
-      select: { id: true, email: true, createdAt: true, publicSlug: true },
-    });
+        where: { id: req.userId },
+        data: { publicSlug: slug },
+        select: { id: true, email: true, createdAt: true, publicSlug: true, emailVerified: true },
+      });
 
     res.json(user);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Something went wrong" });
+  }
+});
+
+// ---- Auth: password reset + email verification ----
+app.post("/forgot-password", async (req, res) => {
+  try {
+    const { email } = req.body;
+    const generic = { message: "If an account with that email exists, a reset link has been sent." };
+    if (!email || typeof email !== "string") return res.json(generic);
+    const user = await prisma.user.findFirst({ where: { email: { equals: email.trim(), mode: "insensitive" } } });
+    if (!user) return res.json(generic);
+    // Invalidate prior tokens
+    await prisma.passwordResetToken.deleteMany({ where: { userId: user.id } });
+    const raw = generateRawToken();
+    const tokenHash = hashToken(raw);
+    await prisma.passwordResetToken.create({
+      data: { userId: user.id, tokenHash, expiresAt: new Date(Date.now() + 60 * 60 * 1000) },
+    });
+    try {
+      await sendPasswordResetEmail(user.email, raw);
+    } catch (e) {
+      console.error("Failed to send reset email:", e.message);
+    }
+    return res.json(generic);
+  } catch (err) {
+    console.error(err);
+    return res.json({ message: "If an account with that email exists, a reset link has been sent." });
+  }
+});
+
+app.post("/reset-password", async (req, res) => {
+  try {
+    const { token, newPassword } = req.body;
+    if (!token || !newPassword) return res.status(400).json({ error: "Token and new password are required." });
+    if (typeof newPassword !== "string" || newPassword.length < 8) {
+      return res.status(400).json({ error: "Password must be at least 8 characters." });
+    }
+    const tokenHash = hashToken(String(token).trim());
+    const record = await prisma.passwordResetToken.findUnique({ where: { tokenHash } });
+    if (!record) return res.status(400).json({ error: "Invalid or expired reset token." });
+    if (record.usedAt) return res.status(400).json({ error: "This reset link has already been used." });
+    if (record.expiresAt < new Date()) {
+      await prisma.passwordResetToken.delete({ where: { id: record.id } });
+      return res.status(400).json({ error: "This reset link has expired. Please request a new one." });
+    }
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    await prisma.user.update({ where: { id: record.userId }, data: { password: hashedPassword } });
+    await prisma.passwordResetToken.delete({ where: { id: record.id } });
+    return res.json({ message: "Password has been reset. You can now sign in." });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "Something went wrong" });
+  }
+});
+
+app.get("/verify-email", async (req, res) => {
+  try {
+    const token = String(req.query.token || "").trim();
+    if (!token) return res.status(400).json({ error: "Verification token is required." });
+    const tokenHash = hashToken(token);
+    const record = await prisma.emailVerificationToken.findUnique({ where: { tokenHash } });
+    if (!record) return res.status(400).json({ error: "Invalid or expired verification link." });
+    if (record.expiresAt < new Date()) {
+      await prisma.emailVerificationToken.delete({ where: { id: record.id } });
+      return res.status(400).json({ error: "Verification link has expired. Please request a new one." });
+    }
+    await prisma.user.update({ where: { id: record.userId }, data: { emailVerified: true } });
+    await prisma.emailVerificationToken.delete({ where: { id: record.id } });
+    return res.json({ message: "Email verified successfully." });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "Something went wrong" });
+  }
+});
+
+app.post("/resend-verification", requireAuth, resendVerificationLimiter, async (req, res) => {
+  try {
+    const user = await prisma.user.findUnique({ where: { id: req.userId } });
+    if (!user) return res.status(404).json({ error: "User not found" });
+    if (user.emailVerified) return res.status(400).json({ error: "Email is already verified." });
+    await prisma.emailVerificationToken.deleteMany({ where: { userId: user.id } });
+    const raw = generateRawToken();
+    const tokenHash = hashToken(raw);
+    await prisma.emailVerificationToken.create({
+      data: { userId: user.id, tokenHash, expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000) },
+    });
+    await sendVerificationEmail(user.email, raw);
+    return res.json({ message: "Verification email sent." });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "Something went wrong" });
   }
 });
 
@@ -257,6 +387,9 @@ app.post("/monitors", requireAuth, async (req, res) => {
     if (!url || !name) {
       return res.status(400).json({ error: "url and name are required" });
     }
+    if (intervalMins != null && Number(intervalMins) < 1) {
+      return res.status(400).json({ error: "Check interval must be at least 1 minute." });
+    }
 
     const monitor = await prisma.monitor.create({
       data: {
@@ -308,6 +441,14 @@ app.get("/monitors", requireAuth, async (req, res) => {
         responseTimeMs: latest?.responseTimeMs ?? null,
         statusCode: latest?.statusCode ?? null,
         checkedAt: latest?.checkedAt ?? null,
+        sslMonitoringEnabled: monitor.sslMonitoringEnabled,
+        certExpiresAt: monitor.certExpiresAt,
+        lastSslCheckAt: monitor.lastSslCheckAt,
+        sslAlertStage: monitor.sslAlertStage,
+        domainMonitoringEnabled: monitor.domainMonitoringEnabled,
+        domainExpiresAt: monitor.domainExpiresAt,
+        lastDomainCheckAt: monitor.lastDomainCheckAt,
+        domainAlertStage: monitor.domainAlertStage,
       };
     });
 
@@ -340,6 +481,7 @@ app.get("/monitors/:id/checks", requireAuth, async (req, res) => {
         responseTimeMs: true,
         statusCode: true,
         checkedAt: true,
+        assertionResults: true,
       },
     });
 
@@ -351,11 +493,136 @@ app.get("/monitors/:id/checks", requireAuth, async (req, res) => {
   }
 });
 
-// UPDATE a monitor
+// ---- Monitor Assertions (ADDITIVE — JSON/body checks layered on existing status-code check) ----
+const VALID_TYPES = ["STATUS_CODE", "RESPONSE_TIME", "BODY_CONTAINS", "JSON_FIELD_EQUALS"];
+const VALID_OPERATORS = ["EQUALS", "CONTAINS", "LESS_THAN", "GREATER_THAN"];
+
+function validateAssertionInput(body) {
+  const { type, field, operator, expectedValue } = body;
+
+  if (!VALID_TYPES.includes(type)) {
+    return `type must be one of ${VALID_TYPES.join(", ")}`;
+  }
+  if (!VALID_OPERATORS.includes(operator)) {
+    return `operator must be one of ${VALID_OPERATORS.join(", ")}`;
+  }
+  if (expectedValue == null || String(expectedValue).trim() === "") {
+    return "expectedValue is required";
+  }
+
+  // JSON_FIELD_EQUALS requires field; others must have field null
+  if (type === "JSON_FIELD_EQUALS") {
+    if (!field || typeof field !== "string" || !field.trim()) {
+      return "field is required for JSON_FIELD_EQUALS (e.g. \"data.status\")";
+    }
+  } else {
+    if (field != null && String(field).trim() !== "") {
+      return `field must be null for ${type} (only JSON_FIELD_EQUALS uses field)`;
+    }
+  }
+
+  // Strict operator/type matching
+  if (type === "STATUS_CODE" && operator !== "EQUALS") {
+    return "STATUS_CODE only supports EQUALS (e.g. expectedValue \"200\")";
+  }
+  if (type === "BODY_CONTAINS" && !["CONTAINS", "EQUALS"].includes(operator)) {
+    return "BODY_CONTAINS only supports CONTAINS or EQUALS";
+  }
+  if ((operator === "LESS_THAN" || operator === "GREATER_THAN") && !["RESPONSE_TIME", "JSON_FIELD_EQUALS"].includes(type)) {
+    return "LESS_THAN/GREATER_THAN only for RESPONSE_TIME or numeric JSON_FIELD_EQUALS";
+  }
+  if ((operator === "LESS_THAN" || operator === "GREATER_THAN") && type === "JSON_FIELD_EQUALS" && isNaN(Number(expectedValue))) {
+    return "LESS_THAN/GREATER_THAN on JSON_FIELD_EQUALS requires numeric expectedValue";
+  }
+  if (type === "RESPONSE_TIME" && isNaN(Number(expectedValue))) {
+    return "RESPONSE_TIME expectedValue must be numeric (milliseconds)";
+  }
+  if (type === "STATUS_CODE" && isNaN(Number(expectedValue))) {
+    return "STATUS_CODE expectedValue must be numeric (e.g. \"200\")";
+  }
+
+  return null;
+}
+
+// POST /monitors/:id/assertions — create
+app.post("/monitors/:id/assertions", requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const monitor = await prisma.monitor.findUnique({ where: { id } });
+    if (!monitor || monitor.userId !== req.userId) {
+      return res.status(404).json({ error: "Monitor not found" });
+    }
+
+    const error = validateAssertionInput(req.body);
+    if (error) return res.status(400).json({ error });
+
+    const { type, field, operator, expectedValue } = req.body;
+
+    const assertion = await prisma.monitorAssertion.create({
+      data: {
+        monitorId: id,
+        type,
+        field: type === "JSON_FIELD_EQUALS" ? String(field).trim() : null,
+        operator,
+        expectedValue: String(expectedValue),
+      },
+    });
+
+    res.status(201).json(assertion);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Something went wrong" });
+  }
+});
+
+// GET /monitors/:id/assertions — list
+app.get("/monitors/:id/assertions", requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const monitor = await prisma.monitor.findUnique({ where: { id } });
+    if (!monitor || monitor.userId !== req.userId) {
+      return res.status(404).json({ error: "Monitor not found" });
+    }
+
+    const assertions = await prisma.monitorAssertion.findMany({
+      where: { monitorId: id },
+      orderBy: { createdAt: "desc" },
+    });
+
+    res.json(assertions);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Something went wrong" });
+  }
+});
+
+// DELETE /monitors/:id/assertions/:assertionId
+app.delete("/monitors/:id/assertions/:assertionId", requireAuth, async (req, res) => {
+  try {
+    const { id, assertionId } = req.params;
+    const monitor = await prisma.monitor.findUnique({ where: { id } });
+    if (!monitor || monitor.userId !== req.userId) {
+      return res.status(404).json({ error: "Monitor not found" });
+    }
+
+    const assertion = await prisma.monitorAssertion.findUnique({ where: { id: assertionId } });
+    if (!assertion || assertion.monitorId !== id) {
+      return res.status(404).json({ error: "Assertion not found" });
+    }
+
+    await prisma.monitorAssertion.delete({ where: { id: assertionId } });
+    res.json({ message: "Assertion deleted" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Something went wrong" });
+  }
+});
+
+// UPDATE a monitor — also handles SSL/domain expiry flags (additive, not touching uptime logic)
 app.put("/monitors/:id", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
-    const { url, name, intervalMins, isActive } = req.body;
+    const { url, name, intervalMins, isActive, sslMonitoringEnabled, domainMonitoringEnabled } = req.body;
 
     const monitor = await prisma.monitor.findUnique({ where: { id } });
 
@@ -363,9 +630,23 @@ app.put("/monitors/:id", requireAuth, async (req, res) => {
       return res.status(404).json({ error: "Monitor not found" });
     }
 
+    if (intervalMins != null && Number(intervalMins) < 1) {
+      return res.status(400).json({ error: "Check interval must be at least 1 minute." });
+    }
+    if (sslMonitoringEnabled !== undefined && typeof sslMonitoringEnabled !== "boolean") {
+      return res.status(400).json({ error: "sslMonitoringEnabled must be a boolean" });
+    }
+    if (domainMonitoringEnabled !== undefined && typeof domainMonitoringEnabled !== "boolean") {
+      return res.status(400).json({ error: "domainMonitoringEnabled must be a boolean" });
+    }
+
+    const data = { url, name, intervalMins, isActive };
+    if (sslMonitoringEnabled !== undefined) data.sslMonitoringEnabled = sslMonitoringEnabled;
+    if (domainMonitoringEnabled !== undefined) data.domainMonitoringEnabled = domainMonitoringEnabled;
+
     const updated = await prisma.monitor.update({
       where: { id },
-      data: { url, name, intervalMins, isActive },
+      data,
     });
 
     // Re-add it only if still active
@@ -378,6 +659,30 @@ app.put("/monitors/:id", requireAuth, async (req, res) => {
     } else {
       // If deactivated, remove the schedule entirely
       await monitorQueue.removeJobScheduler(`monitor-${updated.id}`);
+    }
+
+    // SSL/domain expiry scheduling — orthogonal to isActive per spec
+    // Fix A: per-flag immediate trigger (was global !hadBefore && hasNow, missed second flag enable on YT)
+    const sslWasJustEnabled = !monitor.sslMonitoringEnabled && updated.sslMonitoringEnabled;
+    const domainWasJustEnabled = !monitor.domainMonitoringEnabled && updated.domainMonitoringEnabled;
+
+    if (updated.sslMonitoringEnabled || updated.domainMonitoringEnabled) {
+      await sslDomainQueue.upsertJobScheduler(
+        `ssl-domain-check-${updated.id}`,
+        { every: 24 * 60 * 60 * 1000 },
+        { name: "check-ssl-domain", data: { monitorId: updated.id } }
+      );
+      // Immediate first data point per-flag (don't make user wait 24h for YT domain after SSL already enabled)
+      if (sslWasJustEnabled || domainWasJustEnabled) {
+        await sslDomainQueue.add(
+          "check-ssl-domain",
+          { monitorId: updated.id },
+          { jobId: `immediate-${updated.id}-${Date.now()}` }
+        );
+      }
+    } else {
+      // Both flags disabled → clean up scheduler
+      await sslDomainQueue.removeJobScheduler(`ssl-domain-check-${updated.id}`);
     }
 
     res.json(updated);
@@ -400,8 +705,9 @@ app.delete("/monitors/:id", requireAuth, async (req, res) => {
 
     await prisma.monitor.delete({ where: { id } });
 
-    // Remove its scheduled job too
+    // Remove its scheduled jobs too
     await monitorQueue.removeJobScheduler(`monitor-${id}`);
+    await sslDomainQueue.removeJobScheduler(`ssl-domain-check-${id}`);
 
     res.json({ message: "Monitor deleted" });
   } catch (err) {

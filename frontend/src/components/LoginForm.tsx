@@ -60,6 +60,9 @@ export function LoginForm() {
         {error && <p className="auth-feedback auth-feedback-error" role="alert">{error}</p>}
         <button type="submit" disabled={loading} className="auth-submit">{loading ? "Signing in…" : "Sign in"}</button>
       </form>
+      <p className="auth-footer" style={{ marginTop: "0.75rem" }}>
+        <Link href="/forgot-password">Forgot password?</Link>
+      </p>
       <p className="auth-footer">New to PulseCheck? <Link href="/signup">Create an account</Link></p>
     </>
   );

@@ -20,4 +20,5 @@ export interface UserProfile {
   email: string;
   createdAt: string;
   publicSlug: string | null;
+  emailVerified: boolean;
 }

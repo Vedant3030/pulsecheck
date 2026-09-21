@@ -6,13 +6,13 @@ type Theme = "dark" | "light";
 
 const STORAGE_KEY = "pulsecheck-theme";
 
+// Dark is the default on first load, regardless of OS preference.
+// Light applies only after the user explicitly toggles it (persisted).
 function getInitialTheme(): Theme {
   if (typeof window === "undefined") return "dark";
   const stored = localStorage.getItem(STORAGE_KEY);
   if (stored === "light" || stored === "dark") return stored;
-  return window.matchMedia("(prefers-color-scheme: light)").matches
-    ? "light"
-    : "dark";
+  return "dark";
 }
 
 export function ThemeToggle() {

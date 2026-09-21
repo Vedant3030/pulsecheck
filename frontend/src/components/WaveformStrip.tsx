@@ -14,6 +14,9 @@ import {
 } from "@/lib/waveform";
 import type { CheckResult, WaveformStripProps } from "@/types/monitor";
 import { useReducedMotion } from "@/hooks/useReducedMotion";
+import { Switch } from "@/components/ui/switch";
+import { ExpiryBadge } from "@/components/ui/expiry-badge";
+import { AssertionResultBadge } from "@/components/AssertionResultBadge";
 
 function formatCheckedAt(value: Date | string | null): string {
   if (value == null) return "---";
@@ -30,6 +33,15 @@ export function WaveformStrip({
   checkedAt,
   publicSlug,
   variant = "dashboard",
+  sslMonitoringEnabled = false,
+  certExpiresAt = null,
+  sslAlertStage = "NONE",
+  domainMonitoringEnabled = false,
+  domainExpiresAt = null,
+  domainAlertStage = "NONE",
+  onToggleSsl,
+  onToggleDomain,
+  isToggling = false,
 }: WaveformStripProps) {
   const isUp = status === "up";
   const awaitingCheck = !isUp && checkedAt == null;
@@ -62,6 +74,8 @@ export function WaveformStrip({
 
   const history = useMemo(() => buildHistoryWaveform(checks), [checks]);
   const hasHistory = checks.length >= 2;
+  // Newest check is last (backend returns oldest-first). Public endpoint omits assertionResults.
+  const latestCheck = checks.length > 0 ? checks[checks.length - 1] : null;
   const historyWidth = history.width;
 
   const scrollShift = hasHistory ? historyWidth : BEAT_WIDTH;
@@ -89,7 +103,7 @@ export function WaveformStrip({
 
   return (
     <article
-      className={`${variant === "dashboard" ? "dashboard-monitor" : "monitor-strip-button panel-border bg-bg-strip"} p-4 ${isUp ? "" : awaitingCheck ? "strip-pending" : "strip-alarm"}`}
+      className={`${variant === "dashboard" ? "dashboard-monitor bg-black/50 backdrop-blur-sm" : "monitor-strip-button panel-border bg-bg-strip"} p-4 ${isUp ? "border-green-500/20" : awaitingCheck ? "strip-pending" : "strip-alarm !border-red-500/20"}`}
       aria-label={`${name} monitor strip`}
       role="button"
       tabIndex={0}
@@ -138,6 +152,43 @@ export function WaveformStrip({
           )}
         </div>
       </div>
+
+      {/* Expiry monitoring — compact supplementary row (ICU theme, monospace) */}
+      {variant === "dashboard" && (onToggleSsl || onToggleDomain) && (
+        <div className="mb-3 flex flex-wrap items-center gap-3 border-y border-grid/50 bg-black/20 px-2 py-2">
+          <label className="flex items-center gap-1.5 text-[10px] tracking-widest text-muted uppercase">
+            <Switch
+              checked={!!sslMonitoringEnabled}
+              onCheckedChange={(v) => {
+                if (isToggling) return;
+                onToggleSsl?.(v);
+              }}
+              disabled={isToggling}
+              aria-label="SSL Monitoring"
+              className="scale-90"
+              onClick={(e) => e.stopPropagation()}
+            />
+            SSL
+          </label>
+          <ExpiryBadge kind="SSL" expiresAt={certExpiresAt} stage={sslAlertStage} enabled={!!sslMonitoringEnabled} />
+          <span className="h-3 w-px bg-grid/50" aria-hidden />
+          <label className="flex items-center gap-1.5 text-[10px] tracking-widest text-muted uppercase">
+            <Switch
+              checked={!!domainMonitoringEnabled}
+              onCheckedChange={(v) => {
+                if (isToggling) return;
+                onToggleDomain?.(v);
+              }}
+              disabled={isToggling}
+              aria-label="Domain Monitoring"
+              className="scale-90"
+              onClick={(e) => e.stopPropagation()}
+            />
+            Domain
+          </label>
+          <ExpiryBadge kind="Domain" expiresAt={domainExpiresAt} stage={domainAlertStage} enabled={!!domainMonitoringEnabled} />
+        </div>
+      )}
 
       <div className="relative h-20 overflow-hidden border border-grid bg-bg">
         {!isUp && !awaitingCheck && (
@@ -244,6 +295,11 @@ export function WaveformStrip({
             <p className="vital-label">Inspection</p>
             <p className="mt-1 text-muted">Click again to collapse</p>
           </div>
+          {!publicSlug && latestCheck?.assertionResults && latestCheck.assertionResults.length > 0 && (
+            <div className="sm:col-span-4">
+              <AssertionResultBadge results={latestCheck.assertionResults} />
+            </div>
+          )}
         </div>
       )}
     </article>

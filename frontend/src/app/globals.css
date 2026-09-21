@@ -10,29 +10,31 @@
   pulls from one source of truth. Tailwind v4 reads them via @theme.
 */
 
-/* Light theme overrides — applied when <html class="light"> is set */
+/* Light theme — "clinical light green": same green family as dark mode,
+   deepened for contrast on white, surfaces tinted green to kill the glare */
 html.light {
-  --color-bg: #fafaf9;
-  --color-bg-panel: #ffffff;
-  --color-bg-strip: #f5f5f4;
-  --color-phosphor: #e86c00;
-  --color-phosphor-dim: #c45a00;
-  --color-phosphor-bright: #ff8a3d;
-  --color-phosphor-glow: #ff8a3d14;
-  --color-phosphor-rgb: 232, 108, 0;
-  --color-secondary: #eab308;
-  --color-info: #0ea5e9;
-  --color-amber: #f59e0b;
-  --color-amber-dim: #b45309;
-  --color-alarm: #ef4444;
-  --color-alarm-dim: #b91c1c;
-  --color-alarm-glow: #ef444426;
-  --color-grid: #d6d3d1;
-  --text-main: #1c1917;
-  --text-soft: #44403c;
-  --text-muted: #78716c;
-  --bg-sidebar: #fafaf9;
-  --bg-hover: #f5f5f4;
+  --color-bg: #eef3ee;
+  --color-bg-panel: #f7faf7;
+  --color-bg-strip: #e4ece4;
+  --color-phosphor: #177245;
+  --color-phosphor-dim: #175c3a;
+  --color-phosphor-bright: #189a52;
+  --color-phosphor-glow: #1772451a;
+  --color-phosphor-rgb: 23, 114, 69;
+  --color-secondary: #0f766e;
+  --color-info: #0284c7;
+  --color-amber: #b45309;
+  --color-amber-dim: #92400e;
+  --color-alarm: #dc2626;
+  --color-alarm-dim: #991b1b;
+  --color-alarm-glow: #dc262626;
+  --color-grid: #d5ded5;
+  --color-muted: #5b6b7f;
+  --text-main: #1e2e25;
+  --text-soft: #33463c;
+  --text-muted: #5b6b7f;
+  --bg-sidebar: #e9efe9;
+  --bg-hover: #e4ece4;
 }
 
 :root {
@@ -902,16 +904,42 @@ html.light .text-alarm-glow {
 }
 
 .dashboard-monitor {
-  border: 1px solid var(--color-grid);
+  border: 1px solid rgba(34, 197, 94, 0.2);
   border-radius: 0.75rem;
-  background: var(--color-bg-panel);
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
   padding: 1rem;
   transition: border-color 0.15s, background-color 0.15s;
 }
 
+@supports not (backdrop-filter: blur(4px)) {
+  .dashboard-monitor {
+    background: var(--color-bg-panel);
+  }
+}
+
+html.light .dashboard-monitor {
+  background: rgba(247, 250, 247, 0.92);
+  border-color: rgba(23, 114, 69, 0.25);
+}
+
+html.light .dashboard-monitor:hover {
+  border-color: rgba(23, 114, 69, 0.45);
+}
+
+html.light .dashboard-monitor.strip-alarm {
+  background: rgba(247, 250, 247, 0.92);
+  border-color: rgba(220, 38, 38, 0.25);
+}
+
+html.light .dashboard-monitor.strip-pending {
+  background: rgba(247, 250, 247, 0.92);
+}
+
 .dashboard-monitor:hover {
-  border-color: #334155;
-  background: var(--bg-hover);
+  border-color: rgba(34, 197, 94, 0.35);
+  background: rgba(0, 0, 0, 0.6);
 }
 
 .dashboard-monitor:focus-visible {
@@ -937,8 +965,22 @@ html.light .text-alarm-glow {
 
 .dashboard-monitor.strip-alarm {
   animation: none;
-  border-color: rgba(239, 68, 68, 0.45);
+  border-color: rgba(239, 68, 68, 0.2);
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
   box-shadow: none;
+}
+
+.dashboard-monitor.strip-alarm:hover {
+  border-color: rgba(239, 68, 68, 0.35);
+}
+
+.dashboard-monitor.strip-pending {
+  border-color: rgba(245, 158, 11, 0.2);
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
 }
 
 .dashboard-monitor .alarm-blink-text,
@@ -1004,6 +1046,23 @@ html.light .text-alarm-glow {
 
 .management-button-primary:hover:not(:disabled) {
   background: #4ade80;
+}
+
+/* Light mode: primary green deepens, so button text flips to near-white */
+html.light .management-button-primary {
+  color: #f0fdf4;
+}
+
+html.light .management-button-primary:hover:not(:disabled) {
+  background: #16a34a;
+}
+
+html.light .auth-submit {
+  color: #f0fdf4;
+}
+
+html.light .auth-submit:hover:not(:disabled) {
+  background: #16a34a;
 }
 
 .management-button-secondary {
@@ -1480,16 +1539,6 @@ html.light .text-alarm-glow {
 }
 
 
-.dashboard-nav-link:hover {
-  background: var(--color-bg-strip);
-  color: var(--color-text-main);
-}
-
-.dashboard-nav-link-active {
-  background: rgba(99, 102, 241, 0.1);
-  color: var(--color-secondary);
-}
-
 /* Animations */
 @keyframes wave-scroll {
   from {
@@ -1542,9 +1591,8 @@ html.light .text-alarm-glow {
   box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.2) inset !important;
 }
 
-/* Clear out some old ICU-specific classes so they don't break layout */
-.scanline-overlay,
-.live-clock {
+/* ScanlineOverlay is dead code (defined but never mounted) — keep it hidden */
+.scanline-overlay {
   display: none;
 }
 
