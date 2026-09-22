@@ -77,11 +77,12 @@ export async function login(
 export async function signup(
   email: string,
   password: string,
+  turnstileToken?: string,
 ): Promise<SignupResponse> {
   const res = await fetch(`${API_URL}/signup`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email, password, turnstileToken }),
   });
 
   const data = (await res.json()) as SignupResponse & ApiError;
@@ -91,6 +92,20 @@ export async function signup(
   }
 
   return { id: data.id, email: data.email };
+}
+
+export async function deleteAccount(password: string): Promise<{ message: string }> {
+  const res = await apiFetch("/me", {
+    method: "DELETE",
+    body: JSON.stringify({ password }),
+  });
+  await ensureAuthed(res);
+
+  if (!res.ok) {
+    throw new Error(await parseError(res));
+  }
+
+  return (await res.json()) as { message: string };
 }
 
 /** Authenticated fetch — attaches Bearer token from localStorage. */

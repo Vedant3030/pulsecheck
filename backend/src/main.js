@@ -4,9 +4,9 @@ import bcrypt from "bcryptjs";
 import pkg from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import jwt from "jsonwebtoken";
-import rateLimit from "express-rate-limit";
+import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import { requireAuth } from "./middleware/auth.js";
-import { monitorQueue, sslDomainQueue } from "./queue.js";
+import { connection as redisConnection, heartbeatQueue, monitorQueue, sslDomainQueue } from "./queue.js";
 import heartbeatsRouter from "./routes/heartbeats.js";
 import heartbeatPingRouter from "./routes/heartbeatPing.js";
 import { generateRawToken, hashToken } from "./lib/tokens.js";
@@ -33,7 +33,7 @@ const resendVerificationLimiter = rateLimit({
   max: 3,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => req.userId || req.ip,
+  keyGenerator: (req) => req.userId || ipKeyGenerator(req.ip),
   message: { error: "Too many verification requests, please try again later." },
 });
 
@@ -92,12 +92,78 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
+// Deep health — for external monitoring of PulseCheck itself.
+// Verifies DB + Redis; 200 only when every dependency responds.
+// Timeouts keep a down dependency from hanging the endpoint (ioredis
+// queues commands while reconnecting, so a bare ping may never settle).
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out`)), ms)),
+  ]);
+}
+
+app.get("/health/deep", async (req, res) => {
+  const checks = { database: "ok", redis: "ok" };
+  try {
+    await withTimeout(prisma.$queryRaw`SELECT 1`, 5000, "database");
+  } catch (err) {
+    console.error("Deep health: database check failed:", err.message);
+    checks.database = "fail";
+  }
+  try {
+    await withTimeout(redisConnection.ping(), 5000, "redis");
+  } catch (err) {
+    console.error("Deep health: redis check failed:", err.message);
+    checks.redis = "fail";
+  }
+  const healthy = checks.database === "ok" && checks.redis === "ok";
+  res.status(healthy ? 200 : 503).json({
+    status: healthy ? "ok" : "degraded",
+    checks,
+  });
+});
+
+async function verifyTurnstileToken(token, remoteIp) {
+  const secret = process.env.TURNSTILE_SECRET_KEY;
+  if (!secret) {
+    console.error("TURNSTILE_SECRET_KEY missing — rejecting signup");
+    return false;
+  }
+  try {
+    const params = new URLSearchParams({ secret, response: token });
+    if (remoteIp) params.append("remoteip", remoteIp);
+    const resp = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: params.toString(),
+    });
+    const data = await resp.json();
+    if (!data.success) {
+      console.error("Turnstile verification failed:", data["error-codes"]);
+    }
+    return data.success === true;
+  } catch (err) {
+    console.error("Turnstile verification error:", err.message);
+    return false;
+  }
+}
+
 app.post("/signup", authLimiter, async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password, turnstileToken } = req.body;
 
     if (!email || !password) {
       return res.status(400).json({ error: "Email and password are required" });
+    }
+
+    if (!turnstileToken || typeof turnstileToken !== "string") {
+      return res.status(400).json({ error: "Human verification required. Please complete the check." });
+    }
+
+    const human = await verifyTurnstileToken(turnstileToken, req.ip);
+    if (!human) {
+      return res.status(400).json({ error: "Human verification failed. Please try again." });
     }
 
     const existingUser = await prisma.user.findUnique({ where: { email } });
@@ -166,6 +232,9 @@ app.get("/me", requireAuth, async (req, res) => {
     where: { id: req.userId },
     select: { id: true, email: true, createdAt: true, publicSlug: true, emailVerified: true },
   });
+  if (!user) {
+    return res.status(404).json({ error: "User not found" });
+  }
   res.json(user);
 });
 
@@ -206,6 +275,63 @@ app.put("/me/public-slug", requireAuth, async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Something went wrong" });
+  }
+});
+
+// DELETE own account — password confirmation required.
+// Removes BullMQ schedulers first (best-effort), then deletes the user row;
+// Monitors, CheckResults, Assertions, Heartbeats, tokens cascade via FK.
+app.delete("/me", requireAuth, async (req, res) => {
+  try {
+    const { password } = req.body || {};
+    if (!password || typeof password !== "string") {
+      return res.status(400).json({ error: "Please enter your password to confirm deletion." });
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: req.userId } });
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const passwordMatches = await bcrypt.compare(password, user.password);
+    if (!passwordMatches) {
+      return res.status(401).json({ error: "Incorrect password." });
+    }
+
+    const monitors = await prisma.monitor.findMany({
+      where: { userId: req.userId },
+      select: { id: true },
+    });
+    const heartbeats = await prisma.heartbeatMonitor.findMany({
+      where: { userId: req.userId },
+      select: { id: true },
+    });
+
+    for (const monitor of monitors) {
+      try {
+        await withTimeout(monitorQueue.removeJobScheduler(`monitor-${monitor.id}`), 5000, "scheduler");
+      } catch (err) {
+        console.error(`Account delete: failed to remove monitor scheduler ${monitor.id}:`, err.message);
+      }
+      try {
+        await withTimeout(sslDomainQueue.removeJobScheduler(`ssl-domain-check-${monitor.id}`), 5000, "scheduler");
+      } catch (err) {
+        console.error(`Account delete: failed to remove ssl-domain scheduler ${monitor.id}:`, err.message);
+      }
+    }
+    for (const heartbeat of heartbeats) {
+      try {
+        await withTimeout(heartbeatQueue.removeJobScheduler(`heartbeat-${heartbeat.id}`), 5000, "scheduler");
+      } catch (err) {
+        console.error(`Account delete: failed to remove heartbeat scheduler ${heartbeat.id}:`, err.message);
+      }
+    }
+
+    await prisma.user.delete({ where: { id: req.userId } });
+    return res.json({ message: "Account deleted." });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "Something went wrong" });
   }
 });
 

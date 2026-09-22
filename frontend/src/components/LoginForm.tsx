@@ -11,6 +11,7 @@ export function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const sessionExpired = searchParams.get("expired") === "1";
+  const accountDeleted = searchParams.get("deleted") === "1";
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -42,6 +43,7 @@ export function LoginForm() {
   return (
     <>
       {sessionExpired && <p className="auth-feedback auth-feedback-info mb-4">Your session expired. Please sign in again.</p>}
+      {accountDeleted && <p className="auth-feedback auth-feedback-info mb-4">Your account has been deleted.</p>}
       <form onSubmit={handleSubmit} className="auth-form">
         <div className="auth-field">
           <label htmlFor="email">Email address</label>

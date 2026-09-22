@@ -102,6 +102,7 @@ export function ManageMonitors() {
           </div>
           <div className="flex items-center gap-4">
             <Link href="/" className="text-xs font-medium text-[var(--text-muted)] transition hover:text-[var(--text-main)]">← Back to overview</Link>
+            <Link href="/settings" className="text-xs font-medium text-[var(--text-muted)] transition hover:text-[var(--text-main)]">Settings</Link>
             <LogoutButton className="text-xs font-medium text-[var(--text-muted)] transition hover:text-[var(--text-main)]" />
           </div>
         </div>
