@@ -151,7 +151,6 @@ Self-hosted on a DigitalOcean droplet:
 
 ## Roadmap
 
-- [ ] Sentry error tracking
 - [ ] Google OAuth
 - [ ] SMS / webhook alerts
 - [ ] Multi-region checks
