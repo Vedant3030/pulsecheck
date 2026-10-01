@@ -1,3 +1,6 @@
+
+
+
 # PulseCheck
 
 An ICU-style uptime and infrastructure monitoring platform. Add a URL, watch it live on a command-center dashboard, get emailed the moment something changes, and share a public status page with your users.
@@ -5,6 +8,13 @@ An ICU-style uptime and infrastructure monitoring platform. Add a URL, watch it 
 Built as a full-stack, self-hosted DevOps project — not just an app, but the whole pipeline: containerized services, managed database, reverse proxy, free auto-renewing SSL, and automated CI/CD.
 
 🔗 **Live:** https://pulsecheck.bhosalevedant.dev
+
+
+
+https://github.com/user-attachments/assets/c6321f33-be63-4ee5-b69b-18bbe3c77cc2
+
+
+
 
 ## Status
 
