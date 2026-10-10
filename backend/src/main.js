@@ -11,8 +11,9 @@ import heartbeatsRouter from "./routes/heartbeats.js";
 import heartbeatPingRouter from "./routes/heartbeatPing.js";
 import { generateRawToken, hashToken } from "./lib/tokens.js";
 import { sendPasswordResetEmail, sendVerificationEmail } from "./lib/email.js";
-import { encrypt, requireEncryptionKey } from "./lib/crypto.js";
+import { decrypt, encrypt, requireEncryptionKey } from "./lib/crypto.js";
 import { validateMonitorRequestFields } from "./lib/monitorValidation.js";
+import { GuardError, guardedRequest } from "./lib/ssrfGuard.js";
 
 // Fail fast if ENCRYPTION_KEY is missing/malformed (names exactly what's wrong).
 try {
@@ -50,6 +51,17 @@ const resendVerificationLimiter = rateLimit({
   legacyHeaders: false,
   keyGenerator: (req) => req.userId || ipKeyGenerator(req.ip),
   message: { error: "Too many verification requests, please try again later." },
+});
+
+// One-off trial requests from the monitor form — bounded so it can't be
+// used as an oracle/proxy at scale. Keyed by userId (requireAuth runs first).
+const testRequestLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.userId || ipKeyGenerator(req.ip),
+  message: { ok: false, code: "rate_limited", message: "Too many test requests — please wait a minute and try again." },
 });
 
 // Support multiple allowed origins (local dev + production), comma-separated
@@ -577,6 +589,185 @@ app.post("/monitors", requireAuth, async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Something went wrong" });
+  }
+});
+
+// Common HTTP reason phrases (undici doesn't expose the wire reason phrase).
+function httpStatusText(code) {
+  const map = {
+    200: "OK", 201: "Created", 202: "Accepted", 204: "No Content",
+    301: "Moved Permanently", 302: "Found", 303: "See Other", 304: "Not Modified",
+    307: "Temporary Redirect", 308: "Permanent Redirect",
+    400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found",
+    405: "Method Not Allowed", 408: "Request Timeout", 409: "Conflict",
+    422: "Unprocessable Entity", 429: "Too Many Requests",
+    500: "Internal Server Error", 502: "Bad Gateway", 503: "Service Unavailable", 504: "Gateway Timeout",
+  };
+  return map[code] || "";
+}
+
+// Map probe failures to stable codes. Fixed strings only — never forward
+// internal error text (it can contain resolver/socket internals).
+function mapTestError(err) {
+  if (err instanceof GuardError) {
+    return { code: err.code, message: err.message };
+  }
+  if (err && err.code === "EBLOCKED") {
+    return { code: "blocked_target", message: "This address isn't allowed: private and internal addresses can't be tested." };
+  }
+  if (err && (err.name === "TimeoutError" || err.name === "AbortError")) {
+    return { code: "timeout", message: "The request timed out after 10 seconds." };
+  }
+  const code = err && err.code;
+  if (code === "ENOTFOUND" || code === "EAI_AGAIN") {
+    return { code: "dns_failure", message: "That hostname could not be resolved. Check the spelling and try again." };
+  }
+  if (code === "ECONNREFUSED") {
+    return { code: "connection_refused", message: "The server refused the connection. Check the host and port." };
+  }
+  if (code === "ECONNRESET" || code === "EPIPE" || code === "ETIMEDOUT" || code === "UND_ERR_CONNECT_TIMEOUT" || code === "UND_ERR_HEADERS_TIMEOUT") {
+    return { code: "connection_failed", message: "The connection failed before a response was received." };
+  }
+  if (code === "UNABLE_TO_VERIFY_LEAF_SIGNATURE" || (err && /certificate/i.test(String(err.message || "")))) {
+    return { code: "tls_error", message: "The server's TLS certificate could not be verified." };
+  }
+  return { code: "upstream_error", message: "The request failed before a response was received." };
+}
+
+// POST /monitors/test — one-off trial request from the create/edit form.
+// Well-formed probes always answer 200 with { ok:true } (any HTTP status)
+// or { ok:false, code, message }; only bad input / not-found / auth and
+// rate limiting use non-200 statuses.
+app.post("/monitors/test", requireAuth, testRequestLimiter, async (req, res) => {
+  try {
+    const { url, monitorId, authValue } = req.body;
+
+    if (typeof url !== "string" || url.trim() === "") {
+      return res.status(400).json({ ok: false, code: "invalid_input", message: "A URL is required." });
+    }
+
+    // Log-safe target: host + pathname only. Query strings and fragments
+    // often carry tokens/secrets, so they must never reach the logs.
+    let safeTarget = "(invalid url)";
+    try {
+      const parsed = new URL(url.trim());
+      safeTarget = `${parsed.host}${parsed.pathname}`;
+    } catch {}
+
+    const { error, clean } = validateMonitorRequestFields(req.body);
+    if (error) {
+      return res.status(400).json({ ok: false, code: "invalid_input", message: error });
+    }
+
+    // Resolve the secret: an explicit value always wins; otherwise fall back
+    // to the stored secret of monitorId (ownership-checked, decrypted here).
+    // Neither the plaintext nor the ciphertext ever leaves the server.
+    let secret = null;
+    if (typeof authValue === "string" && authValue.length > 0) {
+      if (!clean.authType) {
+        return res.status(400).json({ ok: false, code: "invalid_input", message: "authType is required when authValue is set" });
+      }
+      if (Buffer.byteLength(authValue, "utf8") > 2000) {
+        return res.status(400).json({ ok: false, code: "invalid_input", message: "authValue exceeds 2000 chars" });
+      }
+      secret = authValue;
+    } else if (clean.authType) {
+      if (!monitorId) {
+        return res.status(400).json({ ok: false, code: "invalid_input", message: "authValue is required when authType is set" });
+      }
+      const monitor = await prisma.monitor.findUnique({ where: { id: String(monitorId) } });
+      if (!monitor || monitor.userId !== req.userId || !monitor.encryptedAuthValue) {
+        return res.status(404).json({ ok: false, code: "not_found", message: "Monitor not found." });
+      }
+      try {
+        secret = decrypt(monitor.encryptedAuthValue);
+      } catch {
+        return res.status(400).json({ ok: false, code: "invalid_input", message: "The stored credential could not be read. Re-enter the secret and try again." });
+      }
+    }
+
+    const method = clean.method || "GET";
+    const headers = { ...(clean.requestHeaders || {}) };
+    let body;
+    if (clean.requestBody && method !== "GET") {
+      body = clean.requestBody;
+      if (!Object.keys(headers).some((k) => k.toLowerCase() === "content-type")) {
+        headers["Content-Type"] = "application/json";
+      }
+    }
+    // Raw undici sends no User-Agent (unlike global fetch) and some hosts
+    // 4xx requests without one — identify test probes unless overridden.
+    if (!Object.keys(headers).some((k) => k.toLowerCase() === "user-agent")) {
+      headers["User-Agent"] = "PulseCheck/test-request";
+    }
+    if (clean.authType && secret) {
+      if (clean.authType === "bearer") headers["Authorization"] = `Bearer ${secret}`;
+      else headers[clean.authHeaderName || "X-API-Key"] = secret;
+    }
+
+    const start = Date.now();
+    let upstream;
+    try {
+      upstream = await guardedRequest(url.trim(), {
+        method,
+        headers,
+        body,
+        signal: AbortSignal.timeout(10000),
+      });
+    } catch (err) {
+      const mapped = mapTestError(err);
+      // Metadata only — host + path, never query/fragment, bodies, headers, or secrets.
+      console.log(`[test-request] user=${req.userId} ${method} ${safeTarget} -> ${mapped.code} (${Date.now() - start}ms)`);
+      return res.json({ ok: false, code: mapped.code, message: mapped.message });
+    }
+
+    // Read at most 64KB; preview is the first 4KB as text.
+    const MAX_READ = 64 * 1024;
+    const chunks = [];
+    let bytes = 0;
+    let capped = false;
+    try {
+      for await (const chunk of upstream.body) {
+        bytes += chunk.length;
+        if (bytes > MAX_READ) {
+          capped = true;
+          break;
+        }
+        chunks.push(chunk);
+      }
+    } catch {
+      capped = true;
+    } finally {
+      try {
+        upstream.body.destroy();
+      } catch {}
+    }
+    const full = Buffer.concat(chunks).slice(0, MAX_READ);
+    const bodyTruncated = capped || bytes > 4096;
+    const rawCt = upstream.headers["content-type"];
+    const contentType = Array.isArray(rawCt) ? rawCt[0] : rawCt || null;
+    const statusCode = upstream.statusCode;
+    const redirectLocation =
+      statusCode >= 300 && statusCode < 400 && typeof upstream.headers.location === "string"
+        ? upstream.headers.location
+        : undefined;
+    const durationMs = Date.now() - start;
+
+    console.log(`[test-request] user=${req.userId} ${method} ${safeTarget} -> ${statusCode} (${durationMs}ms)`);
+
+    res.json({
+      ok: true,
+      statusCode,
+      statusText: httpStatusText(statusCode),
+      durationMs,
+      contentType,
+      bodyPreview: full.slice(0, 4096).toString("utf8"),
+      bodyTruncated,
+      ...(redirectLocation !== undefined ? { redirectLocation } : {}),
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, code: "upstream_error", message: "Something went wrong" });
   }
 });
 

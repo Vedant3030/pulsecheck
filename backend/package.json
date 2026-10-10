@@ -21,7 +21,8 @@
     "ioredis": "^6.0.0",
     "jsonwebtoken": "^9.0.3",
     "pg": "^8.22.0",
-    "resend": "^6.28.1"
+    "resend": "^6.28.1",
+    "undici": "^8.11.2"
   },
   "devDependencies": {
     "prisma": "^7.9.1"
