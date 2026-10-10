@@ -41,8 +41,8 @@ async function parseError(res: Response): Promise<string> {
   const text = await res.text();
 
   try {
-    const data = JSON.parse(text) as ApiError;
-    return data.error ?? `Request failed (${res.status})`;
+    const data = JSON.parse(text) as ApiError & { message?: string };
+    return data.error ?? data.message ?? `Request failed (${res.status})`;
   } catch {
     if (text.trimStart().startsWith("<!DOCTYPE") || text.trimStart().startsWith("<html")) {
       if (res.status === 404) {
@@ -192,6 +192,52 @@ export async function deleteMonitor(id: string): Promise<void> {
   if (!res.ok) {
     throw new Error(await parseError(res));
   }
+}
+
+export interface TestRequestInput {
+  method?: string;
+  url: string;
+  requestBody?: string | null;
+  requestHeaders?: Record<string, string> | null;
+  authType?: string | null;
+  authHeaderName?: string | null;
+  /** Explicit secret wins; omit (with monitorId) to use the stored one. */
+  authValue?: string;
+  monitorId?: string;
+}
+
+export interface TestRequestSuccess {
+  ok: true;
+  statusCode: number;
+  statusText: string;
+  durationMs: number;
+  contentType: string | null;
+  bodyPreview: string;
+  bodyTruncated: boolean;
+  redirectLocation?: string;
+}
+
+export interface TestRequestFailure {
+  ok: false;
+  code: string;
+  message: string;
+}
+
+export type TestRequestResult = TestRequestSuccess | TestRequestFailure;
+
+/** One-off trial request. Guard/network outcomes return ok:false (HTTP 200); only bad input/auth/rate-limit throw. */
+export async function testMonitorRequest(input: TestRequestInput): Promise<TestRequestResult> {
+  const res = await apiFetch("/monitors/test", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  await ensureAuthed(res);
+
+  if (!res.ok) {
+    throw new Error(await parseError(res));
+  }
+
+  return (await res.json()) as TestRequestResult;
 }
 
 export interface AssertionInput {
