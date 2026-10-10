@@ -71,6 +71,12 @@ model Monitor {
   domainExpiresAt         DateTime?
   lastDomainCheckAt       DateTime?
   domainAlertStage        ExpiryAlertStage  @default(NONE)
+  method                  String            @default("GET")
+  requestBody             String?
+  requestHeaders          Json?
+  authType                String?
+  authHeaderName          String?
+  encryptedAuthValue      String?
 }
 
 model CheckResult {

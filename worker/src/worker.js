@@ -9,6 +9,15 @@ import { fetchCertExpiry } from "./lib/ssl.js";
 import { fetchDomainExpiry } from "./lib/domain.js";
 import { getExpiryStage, shouldAlert } from "./lib/expiryStage.js";
 import { evaluateAssertions } from "./lib/assertions.js";
+import { decrypt, requireEncryptionKey } from "./lib/crypto.js";
+
+// Fail fast if ENCRYPTION_KEY is missing/malformed (names exactly what's wrong).
+try {
+  requireEncryptionKey();
+} catch (err) {
+  console.error(`Startup error: ${err.message}`);
+  process.exit(1);
+}
 
 const { PrismaClient } = pkg;
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
@@ -35,8 +44,48 @@ async function checkMonitor(monitorId) {
   let newStatus;
   let assertionResults = null;
 
+  // ---- Build the richer HTTP request (additive: defaults reproduce old GET) ----
+  const VALID_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
+  const rawMethod = typeof monitor.method === "string" ? monitor.method.toUpperCase() : "GET";
+  const fetchMethod = VALID_METHODS.has(rawMethod) ? rawMethod : "GET";
+  const headers = { ...(monitor.requestHeaders && typeof monitor.requestHeaders === "object" ? monitor.requestHeaders : {}) };
+  let body;
+  if (typeof monitor.requestBody === "string" && monitor.requestBody.trim() !== "" && fetchMethod !== "GET") {
+    // requestBody was validated as JSON at write time; still guard parse here.
+    try {
+      JSON.parse(monitor.requestBody);
+      body = monitor.requestBody;
+      const hasContentType = Object.keys(headers).some((k) => k.toLowerCase() === "content-type");
+      if (!hasContentType) headers["Content-Type"] = "application/json";
+    } catch {
+      // Corrupt stored body — treat as failed check rather than crashing.
+      console.log(`[${monitor.name}] FAILED - stored requestBody is not valid JSON`);
+      await prisma.checkResult.create({
+        data: { monitorId: monitor.id, status: "down", statusCode: null, responseTimeMs: Date.now() - start, assertionResults },
+      });
+      return;
+    }
+  }
+  if (monitor.authType && monitor.encryptedAuthValue) {
+    try {
+      const secret = decrypt(monitor.encryptedAuthValue);
+      if (monitor.authType === "bearer") {
+        headers["Authorization"] = `Bearer ${secret}`;
+      } else if (monitor.authType === "apiKey") {
+        headers[monitor.authHeaderName || "X-API-Key"] = secret;
+      }
+    } catch (err) {
+      // Decrypt failure (wrong key / corrupt row) — mark down, never log the secret.
+      console.log(`[${monitor.name}] FAILED - auth decrypt failed: ${err.message}`);
+      await prisma.checkResult.create({
+        data: { monitorId: monitor.id, status: "down", statusCode: null, responseTimeMs: Date.now() - start, assertionResults },
+      });
+      return;
+    }
+  }
+
   try {
-    const response = await fetch(monitor.url, { method: "GET" });
+    const response = await fetch(monitor.url, { method: fetchMethod, headers, body });
     const responseTimeMs = Date.now() - start;
     const baselineIsUp = response.ok;
 

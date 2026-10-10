@@ -11,6 +11,21 @@ import heartbeatsRouter from "./routes/heartbeats.js";
 import heartbeatPingRouter from "./routes/heartbeatPing.js";
 import { generateRawToken, hashToken } from "./lib/tokens.js";
 import { sendPasswordResetEmail, sendVerificationEmail } from "./lib/email.js";
+import { encrypt, requireEncryptionKey } from "./lib/crypto.js";
+import { validateMonitorRequestFields } from "./lib/monitorValidation.js";
+
+// Fail fast if ENCRYPTION_KEY is missing/malformed (names exactly what's wrong).
+try {
+  requireEncryptionKey();
+} catch (err) {
+  console.error(`Startup error: ${err.message}`);
+  process.exit(1);
+}
+
+function toMonitorResponse(monitor) {
+  const { encryptedAuthValue, ...rest } = monitor;
+  return { ...rest, hasAuth: !!encryptedAuthValue };
+}
 
 const { PrismaClient } = pkg;
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
@@ -508,7 +523,7 @@ app.get("/status/:slug/monitors/:monitorId/checks", async (req, res) => {
 // CREATE a monitor
 app.post("/monitors", requireAuth, async (req, res) => {
   try {
-    const { url, name, intervalMins } = req.body;
+    const { url, name, intervalMins, authValue } = req.body;
 
     if (!url || !name) {
       return res.status(400).json({ error: "url and name are required" });
@@ -517,12 +532,37 @@ app.post("/monitors", requireAuth, async (req, res) => {
       return res.status(400).json({ error: "Check interval must be at least 1 minute." });
     }
 
+    const { error, clean } = validateMonitorRequestFields(req.body);
+    if (error) {
+      return res.status(400).json({ error });
+    }
+
+    // Auth secret handling: encrypt before storing, never log or echo.
+    let encryptedAuthValue = null;
+    if (clean.authType) {
+      if (typeof authValue !== "string" || authValue.length === 0) {
+        return res.status(400).json({ error: "authValue is required when authType is set" });
+      }
+      if (Buffer.byteLength(authValue, "utf8") > 2000) {
+        return res.status(400).json({ error: "authValue exceeds 2000 chars" });
+      }
+      encryptedAuthValue = encrypt(authValue);
+    } else if (typeof authValue === "string" && authValue.length > 0) {
+      return res.status(400).json({ error: "authType is required when authValue is set" });
+    }
+
     const monitor = await prisma.monitor.create({
       data: {
         url,
         name,
         intervalMins: intervalMins || 5,
         userId: req.userId,
+        method: clean.method || "GET",
+        requestBody: clean.requestBody ?? null,
+        requestHeaders: clean.requestHeaders ?? null,
+        authType: clean.authType,
+        authHeaderName: clean.authType === "apiKey" ? clean.authHeaderName : null,
+        encryptedAuthValue,
       },
     });
 
@@ -533,7 +573,7 @@ app.post("/monitors", requireAuth, async (req, res) => {
       { name: "check-monitor", data: { monitorId: monitor.id } }
     );
 
-    res.status(201).json(monitor);
+    res.status(201).json(toMonitorResponse(monitor));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Something went wrong" });
@@ -575,6 +615,12 @@ app.get("/monitors", requireAuth, async (req, res) => {
         domainExpiresAt: monitor.domainExpiresAt,
         lastDomainCheckAt: monitor.lastDomainCheckAt,
         domainAlertStage: monitor.domainAlertStage,
+        method: monitor.method ?? "GET",
+        requestBody: monitor.requestBody ?? null,
+        requestHeaders: monitor.requestHeaders ?? null,
+        authType: monitor.authType ?? null,
+        authHeaderName: monitor.authHeaderName ?? null,
+        hasAuth: !!monitor.encryptedAuthValue,
       };
     });
 
@@ -748,7 +794,7 @@ app.delete("/monitors/:id/assertions/:assertionId", requireAuth, async (req, res
 app.put("/monitors/:id", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
-    const { url, name, intervalMins, isActive, sslMonitoringEnabled, domainMonitoringEnabled } = req.body;
+    const { url, name, intervalMins, isActive, sslMonitoringEnabled, domainMonitoringEnabled, authValue } = req.body;
 
     const monitor = await prisma.monitor.findUnique({ where: { id } });
 
@@ -769,6 +815,63 @@ app.put("/monitors/:id", requireAuth, async (req, res) => {
     const data = { url, name, intervalMins, isActive };
     if (sslMonitoringEnabled !== undefined) data.sslMonitoringEnabled = sslMonitoringEnabled;
     if (domainMonitoringEnabled !== undefined) data.domainMonitoringEnabled = domainMonitoringEnabled;
+
+    // --- HTTP request fields (shared strict validation) ---
+    const REQUEST_KEYS = ["method", "requestBody", "requestHeaders", "authType", "authHeaderName", "authValue"];
+    const touchesRequest = REQUEST_KEYS.some((k) => k in req.body);
+    if (touchesRequest) {
+      // Validate the effective final state (explicit values fall back to stored ones)
+      // so the Authorization-collision rule sees the real combination.
+      const effective = {
+        method: "method" in req.body ? req.body.method : monitor.method,
+        requestBody: "requestBody" in req.body ? req.body.requestBody : monitor.requestBody,
+        requestHeaders: "requestHeaders" in req.body ? req.body.requestHeaders : monitor.requestHeaders,
+        authType: "authType" in req.body ? req.body.authType : monitor.authType,
+        authHeaderName: "authHeaderName" in req.body ? req.body.authHeaderName : monitor.authHeaderName,
+      };
+      const { error, clean } = validateMonitorRequestFields(effective);
+      if (error) {
+        return res.status(400).json({ error });
+      }
+
+      if ("method" in req.body) data.method = clean.method || "GET";
+      if ("requestBody" in req.body) {
+        data.requestBody = clean.requestBody ?? null;
+      }
+      if ("requestHeaders" in req.body) {
+        data.requestHeaders = clean.requestHeaders ?? null;
+      }
+
+      const authTypeTouched = "authType" in req.body;
+      const wantsClear = authTypeTouched && clean.authType === null;
+      if (wantsClear) {
+        data.authType = null;
+        data.authHeaderName = null;
+        data.encryptedAuthValue = null;
+      } else {
+        // Effective auth after this update (new value or stored).
+        const effectiveAuth = authTypeTouched ? clean.authType : monitor.authType;
+        if (typeof authValue === "string" && authValue.length > 0 && !effectiveAuth) {
+          return res.status(400).json({ error: "authType is required when authValue is set" });
+        }
+        if (effectiveAuth) {
+          data.authType = effectiveAuth;
+          data.authHeaderName = effectiveAuth === "apiKey" ? clean.authHeaderName : null;
+          if (typeof authValue === "string" && authValue.length > 0) {
+            if (Buffer.byteLength(authValue, "utf8") > 2000) {
+              return res.status(400).json({ error: "authValue exceeds 2000 chars" });
+            }
+            data.encryptedAuthValue = encrypt(authValue);
+          } else if (!monitor.encryptedAuthValue || (authTypeTouched && monitor.authType !== effectiveAuth)) {
+            // Setting auth fresh (or switching type) requires a secret.
+            return res.status(400).json({ error: "authValue is required when authType is set" });
+          }
+          // else: empty secret + unchanged type → keep stored ciphertext untouched.
+        } else if ("authHeaderName" in req.body) {
+          data.authHeaderName = null;
+        }
+      }
+    }
 
     const updated = await prisma.monitor.update({
       where: { id },
@@ -811,7 +914,7 @@ app.put("/monitors/:id", requireAuth, async (req, res) => {
       await sslDomainQueue.removeJobScheduler(`ssl-domain-check-${updated.id}`);
     }
 
-    res.json(updated);
+    res.json(toMonitorResponse(updated));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Something went wrong" });

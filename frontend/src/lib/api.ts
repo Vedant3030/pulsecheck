@@ -28,6 +28,13 @@ export interface MonitorInput {
   url: string;
   intervalMins: number;
   isActive?: boolean;
+  method?: string;
+  requestBody?: string | null;
+  requestHeaders?: Record<string, string> | null;
+  authType?: string | null;
+  authHeaderName?: string | null;
+  /** Write-only plaintext secret. Never returned by the API. Omit to keep existing. */
+  authValue?: string;
 }
 
 async function parseError(res: Response): Promise<string> {

@@ -3,6 +3,10 @@ export type MonitorStatus = "up" | "down";
 
 export type ExpiryAlertStage = "NONE" | "WARNED_30D" | "WARNED_14D" | "WARNED_7D" | "EXPIRED" | "UNSUPPORTED";
 
+export type MonitorMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+
+export type MonitorAuthType = "bearer" | "apiKey";
+
 export interface Monitor {
   id: string;
   name: string;
@@ -22,6 +26,13 @@ export interface Monitor {
   domainExpiresAt: string | null;
   lastDomainCheckAt: string | null;
   domainAlertStage: ExpiryAlertStage;
+  method: MonitorMethod;
+  requestBody: string | null;
+  requestHeaders: Record<string, string> | null;
+  authType: MonitorAuthType | null;
+  authHeaderName: string | null;
+  /** True when a secret is stored. The secret itself is never returned. */
+  hasAuth: boolean;
 }
 
 /** One ping result — from GET /monitors/:id/checks */
