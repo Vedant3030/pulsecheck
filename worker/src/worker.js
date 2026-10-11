@@ -10,7 +10,41 @@ import { fetchDomainExpiry } from "./lib/domain.js";
 import { getExpiryStage, shouldAlert } from "./lib/expiryStage.js";
 import { evaluateAssertions } from "./lib/assertions.js";
 import { decrypt, requireEncryptionKey } from "./lib/crypto.js";
-import { GuardError, readCappedBody, requestWithRedirects, sanitizeMessageUrls } from "./lib/ssrfGuard.js";
+import { GuardError, readCappedBody, requestWithRedirects, safeDestroy, sanitizeMessageUrls } from "./lib/ssrfGuard.js";
+
+// Last-resort process guards. Log a sanitized one-line message (error name
+// and code only — never message/stack, which may embed URLs or bodies).
+// Stream/undici errors (UND_ERR*) are contained and the process stays alive;
+// anything else exits non-zero so the restart policy handles it.
+function sanitizedErrorLine(err) {
+  const name = err && err.name ? String(err.name) : "Error";
+  const code = err && err.code ? String(err.code) : "UNKNOWN";
+  return `${name} ${code}`;
+}
+
+function isStreamError(err) {
+  return !!err && typeof err.code === "string" && err.code.startsWith("UND_ERR");
+}
+
+process.on("unhandledRejection", (reason) => {
+  const err = reason instanceof Error ? reason : new Error("unhandled rejection");
+  if (isStreamError(err)) {
+    console.error(`[worker] unhandledRejection (contained): ${sanitizedErrorLine(err)}`);
+    return;
+  }
+  console.error(`[worker] unhandledRejection (fatal): ${sanitizedErrorLine(err)}`);
+  process.exit(1);
+});
+
+process.on("uncaughtException", (err) => {
+  const e = err instanceof Error ? err : new Error("uncaught exception");
+  if (isStreamError(e)) {
+    console.error(`[worker] uncaughtException (contained): ${sanitizedErrorLine(e)}`);
+    return;
+  }
+  console.error(`[worker] uncaughtException (fatal): ${sanitizedErrorLine(e)}`);
+  process.exit(1);
+});
 
 // Fail fast if ENCRYPTION_KEY is missing/malformed (names exactly what's wrong).
 try {
@@ -124,9 +158,9 @@ async function checkMonitor(monitorId) {
         bodyText = "";
       }
     } else {
-      try {
-        response.body.destroy();
-      } catch {}
+      // No assertions need the body — destroy without reading. safeDestroy
+      // absorbs the RequestAbortedError undici emits on unconsumed destroy.
+      safeDestroy(response.body);
     }
 
     let allAssertionsPass = true;

@@ -406,12 +406,41 @@ export function createGuardedDispatcher() {
 }
 
 /**
+ * Attach a noop 'error' listener to a response body stream if it has none.
+ * Call right after a response is received, before reading: errors raised
+ * during for-await/break/destroy paths are then absorbed instead of thrown
+ * as unhandled 'error' events (which kill the process). Never overrides an
+ * existing handler and never stacks duplicates (listenerCount guard).
+ */
+export function silenceStreamErrors(body) {
+  try {
+    if (body && typeof body.listenerCount === "function" && body.listenerCount("error") === 0) {
+      body.on("error", () => {});
+    }
+  } catch {}
+}
+
+/**
+ * Destroy a response body stream without risking an unhandled 'error' event.
+ * Undici's BodyReadable emits RequestAbortedError when destroyed with an
+ * in-flight request; with no 'error' listener Node kills the process.
+ */
+export function safeDestroy(body) {
+  if (!body || typeof body.destroy !== "function") return;
+  silenceStreamErrors(body);
+  try {
+    body.destroy();
+  } catch {}
+}
+
+/**
  * Read at most maxBytes from an undici response body, then destroy the
  * stream. Stops early (no full download) once the cap is exceeded.
  * Returns { text, truncated }. Throws on stream errors (stream still
  * destroyed via finally) so the caller can record a clean failure.
  */
 export async function readCappedBody(response, maxBytes) {
+  silenceStreamErrors(response.body);
   const chunks = [];
   let bytes = 0;
   let truncated = false;
@@ -425,9 +454,7 @@ export async function readCappedBody(response, maxBytes) {
       chunks.push(chunk);
     }
   } finally {
-    try {
-      response.body.destroy();
-    } catch {}
+    safeDestroy(response.body);
   }
   return { text: Buffer.concat(chunks).toString("utf8"), truncated };
 }
@@ -540,9 +567,7 @@ export async function requestWithRedirects(
 
     // Hop bodies are irrelevant — destroy, don't drain. Draining would
     // download an unbounded redirect body (there is no worker timeout).
-    try {
-      res.body.destroy();
-    } catch {}
+    safeDestroy(res.body);
 
     let next;
     try {

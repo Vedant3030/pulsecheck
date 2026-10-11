@@ -13,7 +13,7 @@ import { generateRawToken, hashToken } from "./lib/tokens.js";
 import { sendPasswordResetEmail, sendVerificationEmail } from "./lib/email.js";
 import { decrypt, encrypt, requireEncryptionKey } from "./lib/crypto.js";
 import { validateMonitorRequestFields } from "./lib/monitorValidation.js";
-import { GuardError, guardedRequest } from "./lib/ssrfGuard.js";
+import { GuardError, guardedRequest, safeDestroy, silenceStreamErrors } from "./lib/ssrfGuard.js";
 
 // Fail fast if ENCRYPTION_KEY is missing/malformed (names exactly what's wrong).
 try {
@@ -722,6 +722,9 @@ app.post("/monitors/test", requireAuth, testRequestLimiter, async (req, res) => 
     }
 
     // Read at most 64KB; preview is the first 4KB as text.
+    // Listener attached before reading so break/destroy errors can't escape
+    // as unhandled 'error' events.
+    silenceStreamErrors(upstream.body);
     const MAX_READ = 64 * 1024;
     const chunks = [];
     let bytes = 0;
@@ -738,9 +741,7 @@ app.post("/monitors/test", requireAuth, testRequestLimiter, async (req, res) => 
     } catch {
       capped = true;
     } finally {
-      try {
-        upstream.body.destroy();
-      } catch {}
+      safeDestroy(upstream.body);
     }
     const full = Buffer.concat(chunks).slice(0, MAX_READ);
     const bodyTruncated = capped || bytes > 4096;
