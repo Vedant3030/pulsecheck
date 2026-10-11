@@ -10,6 +10,7 @@ import { fetchDomainExpiry } from "./lib/domain.js";
 import { getExpiryStage, shouldAlert } from "./lib/expiryStage.js";
 import { evaluateAssertions } from "./lib/assertions.js";
 import { decrypt, requireEncryptionKey } from "./lib/crypto.js";
+import { GuardError, readCappedBody, requestWithRedirects, sanitizeMessageUrls } from "./lib/ssrfGuard.js";
 
 // Fail fast if ENCRYPTION_KEY is missing/malformed (names exactly what's wrong).
 try {
@@ -49,6 +50,13 @@ async function checkMonitor(monitorId) {
   const rawMethod = typeof monitor.method === "string" ? monitor.method.toUpperCase() : "GET";
   const fetchMethod = VALID_METHODS.has(rawMethod) ? rawMethod : "GET";
   const headers = { ...(monitor.requestHeaders && typeof monitor.requestHeaders === "object" ? monitor.requestHeaders : {}) };
+  // Worker-set defaults — kept on cross-origin redirect hops, where all
+  // user-configured headers (including auth) are dropped.
+  const defaultHeaders = {};
+  if (!Object.keys(headers).some((k) => k.toLowerCase() === "user-agent")) {
+    headers["User-Agent"] = "PulseCheck/test-request";
+    defaultHeaders["User-Agent"] = "PulseCheck/test-request";
+  }
   let body;
   if (typeof monitor.requestBody === "string" && monitor.requestBody.trim() !== "" && fetchMethod !== "GET") {
     // requestBody was validated as JSON at write time; still guard parse here.
@@ -56,7 +64,10 @@ async function checkMonitor(monitorId) {
       JSON.parse(monitor.requestBody);
       body = monitor.requestBody;
       const hasContentType = Object.keys(headers).some((k) => k.toLowerCase() === "content-type");
-      if (!hasContentType) headers["Content-Type"] = "application/json";
+      if (!hasContentType) {
+        headers["Content-Type"] = "application/json";
+        defaultHeaders["Content-Type"] = "application/json";
+      }
     } catch {
       // Corrupt stored body — treat as failed check rather than crashing.
       console.log(`[${monitor.name}] FAILED - stored requestBody is not valid JSON`);
@@ -85,29 +96,43 @@ async function checkMonitor(monitorId) {
   }
 
   try {
-    const response = await fetch(monitor.url, { method: fetchMethod, headers, body });
+    // Guarded fetch: redirects followed (max 5 hops, uptime semantics
+    // unchanged), every hop validated at resolve time and pinned at connect
+    // time. Blocked targets throw GuardError (or surface EBLOCKED) and land
+    // in the catch below as a normal DOWN — never out of the job.
+    const response = await requestWithRedirects(
+      monitor.url,
+      { method: fetchMethod, headers, keepHeaders: defaultHeaders, body },
+      5
+    );
     const responseTimeMs = Date.now() - start;
-    const baselineIsUp = response.ok;
+    const baselineIsUp = response.statusCode >= 200 && response.statusCode < 300;
 
-    // Capture body once for BODY_CONTAINS / JSON_FIELD_EQUALS (512k cap per spec)
+    // Capture body once for BODY_CONTAINS / JSON_FIELD_EQUALS (512k cap).
+    // Capped streaming read: stops and destroys the stream at the cap, so a
+    // huge body never lands fully in memory. Assertion-less monitors don't
+    // need the body at all — destroy without reading.
+    const BODY_CAP = 512 * 1024;
     let bodyText = "";
     let wasTruncated = false;
-    try {
-      const raw = await response.text();
-      if (raw.length > 512 * 1024) {
-        bodyText = raw.slice(0, 512 * 1024);
-        wasTruncated = true;
-      } else {
-        bodyText = raw;
+    if (monitor.assertions.length > 0) {
+      try {
+        const capped = await readCappedBody(response, BODY_CAP);
+        bodyText = capped.text.length > BODY_CAP ? capped.text.slice(0, BODY_CAP) : capped.text;
+        wasTruncated = capped.truncated;
+      } catch {
+        bodyText = "";
       }
-    } catch {
-      bodyText = "";
+    } else {
+      try {
+        response.body.destroy();
+      } catch {}
     }
 
     let allAssertionsPass = true;
     if (monitor.assertions.length > 0) {
       const evals = evaluateAssertions(monitor.assertions, {
-        statusCode: response.status,
+        statusCode: response.statusCode,
         responseTimeMs,
         bodyText,
         wasTruncated,
@@ -122,7 +147,7 @@ async function checkMonitor(monitorId) {
       data: {
         monitorId: monitor.id,
         status: newStatus,
-        statusCode: response.status,
+        statusCode: response.statusCode,
         responseTimeMs,
         assertionResults,
       },
@@ -130,7 +155,7 @@ async function checkMonitor(monitorId) {
 
     const failCount = assertionResults ? assertionResults.filter((r) => !r.pass).length : 0;
     console.log(
-      `[${monitor.name}] ${response.status} - ${responseTimeMs}ms${failCount ? ` assertions:${failCount} failed` : ""}`
+      `[${monitor.name}] ${response.statusCode} - ${responseTimeMs}ms${failCount ? ` assertions:${failCount} failed` : ""}`
     );
     if (failCount) {
       for (const r of assertionResults.filter((x) => !x.pass)) {
@@ -140,6 +165,13 @@ async function checkMonitor(monitorId) {
   } catch (err) {
     const responseTimeMs = Date.now() - start;
     newStatus = "down";
+    // Guard blocks get a clear reason; anything else is sanitized to host +
+    // path only (never query strings, fragments, bodies, or secrets) before
+    // it reaches logs or stored assertion results.
+    const failureReason =
+      err instanceof GuardError || (err && err.code === "EBLOCKED")
+        ? "Request blocked: target is not a public address."
+        : sanitizeMessageUrls(err && err.message ? String(err.message) : "request failed");
     if (monitor.assertions.length > 0) {
       assertionResults = monitor.assertions.map((a) => ({
         type: a.type,
@@ -148,7 +180,7 @@ async function checkMonitor(monitorId) {
         expectedValue: a.expectedValue,
         actual: "<no response>",
         pass: false,
-        message: `No response — ${a.type} failed (${err.message})`,
+        message: `No response — ${a.type} failed (${failureReason})`,
       }));
     }
 
@@ -162,7 +194,7 @@ async function checkMonitor(monitorId) {
       },
     });
 
-    console.log(`[${monitor.name}] FAILED - ${err.message}`);
+    console.log(`[${monitor.name}] FAILED - ${failureReason}`);
   }
 
   // Alert if status changed from the last check, OR if this is the very

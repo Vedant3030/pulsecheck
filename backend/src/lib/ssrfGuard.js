@@ -406,6 +406,33 @@ export function createGuardedDispatcher() {
 }
 
 /**
+ * Read at most maxBytes from an undici response body, then destroy the
+ * stream. Stops early (no full download) once the cap is exceeded.
+ * Returns { text, truncated }. Throws on stream errors (stream still
+ * destroyed via finally) so the caller can record a clean failure.
+ */
+export async function readCappedBody(response, maxBytes) {
+  const chunks = [];
+  let bytes = 0;
+  let truncated = false;
+  try {
+    for await (const chunk of response.body) {
+      bytes += chunk.length;
+      if (bytes > maxBytes) {
+        truncated = true;
+        break;
+      }
+      chunks.push(chunk);
+    }
+  } finally {
+    try {
+      response.body.destroy();
+    } catch {}
+  }
+  return { text: Buffer.concat(chunks).toString("utf8"), truncated };
+}
+
+/**
  * Validate the URL, then send one request with redirects DISABLED.
  * Returns the undici response ({ statusCode, headers, body stream }).
  * Throws GuardError for blocked/unresolvable targets; underlying network
@@ -425,4 +452,121 @@ export async function guardedRequest(urlString, { method = "GET", headers = {}, 
     dispatcher: createGuardedDispatcher(),
     maxRedirections: 0,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Redirect-following guarded fetch (uptime-check semantics)
+// ---------------------------------------------------------------------------
+
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+function isSameOrigin(a, b) {
+  return a.protocol === b.protocol && a.host === b.host;
+}
+
+function dropContentHeaders(headers) {
+  const out = {};
+  for (const [k, v] of Object.entries(headers)) {
+    const lower = k.toLowerCase();
+    if (lower === "content-type" || lower === "content-length") continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+/**
+ * Strip query strings and fragments from any http(s) URLs embedded in a
+ * free-text message (e.g. upstream error text). Those parts often carry
+ * tokens/secrets and must never reach logs or stored results.
+ */
+export function sanitizeMessageUrls(message) {
+  if (typeof message !== "string") return "";
+  return message.replace(/https?:\/\/[^\s"'<>)\]]+/g, (m) => {
+    let cut = m.length;
+    const q = m.indexOf("?");
+    const h = m.indexOf("#");
+    if (q !== -1) cut = Math.min(cut, q);
+    if (h !== -1) cut = Math.min(cut, h);
+    return m.slice(0, cut);
+  });
+}
+
+/**
+ * Validate the URL, then fetch while following redirects (max maxHops hops),
+ * with fetch-compatible semantics:
+ * - 301/302 on POST (and 303 on any non-GET/HEAD) rewrite to GET with the
+ *   body dropped; 307/308 preserve method and body.
+ * - Every hop's final URL gets full validateTargetUrl() treatment (static +
+ *   resolve-all-addresses), and every connection is pinned at connect time
+ *   by the guarded dispatcher — a public entry URL can never bounce to an
+ *   internal target.
+ * - A hop that changes origin drops ALL caller-supplied headers and keeps
+ *   only `keepHeaders` (worker/request defaults such as User-Agent).
+ *   Same-origin hops keep all headers.
+ * - A hop rejected by validation THROWS its GuardError (so the caller can
+ *   record a clear DOWN with a reason); exhausting maxHops or hitting a
+ *   non-http(s)/missing Location returns the last 3xx response as-is.
+ * Returns the final undici response ({ statusCode, headers, body stream }).
+ */
+export async function requestWithRedirects(
+  urlString,
+  { method = "GET", headers = {}, keepHeaders = {}, body, signal } = {},
+  maxHops = 5
+) {
+  const entry = await validateTargetUrl(urlString);
+  let current = new URL(entry.toString());
+  let currentMethod = String(method || "GET").toUpperCase();
+  let currentHeaders = { ...headers };
+  let currentBody = body;
+
+  for (let hop = 0; ; hop++) {
+    const res = await undiciRequest(current.toString(), {
+      method: currentMethod,
+      headers: currentHeaders,
+      body: currentBody,
+      signal,
+      dispatcher: createGuardedDispatcher(),
+      maxRedirections: 0,
+    });
+
+    let location = res.headers ? res.headers.location : undefined;
+    if (Array.isArray(location)) location = location[0];
+    const canFollow =
+      REDIRECT_STATUSES.has(res.statusCode) &&
+      typeof location === "string" &&
+      location !== "" &&
+      hop < maxHops;
+    if (!canFollow) return res;
+
+    // Hop bodies are irrelevant — destroy, don't drain. Draining would
+    // download an unbounded redirect body (there is no worker timeout).
+    try {
+      res.body.destroy();
+    } catch {}
+
+    let next;
+    try {
+      next = new URL(location, current.toString());
+    } catch {
+      return res; // Unparseable Location — report the 3xx as-is.
+    }
+    if (next.protocol !== "http:" && next.protocol !== "https:") return res;
+
+    // Full per-hop validation. Throws GuardError on blocked targets so the
+    // caller records DOWN with a clear reason instead of a bare 3xx.
+    await validateTargetUrl(next.toString());
+
+    if (!isSameOrigin(next, current)) {
+      currentHeaders = { ...keepHeaders };
+    }
+    if (
+      ((res.statusCode === 301 || res.statusCode === 302) && currentMethod === "POST") ||
+      (res.statusCode === 303 && currentMethod !== "GET" && currentMethod !== "HEAD")
+    ) {
+      currentMethod = "GET";
+      currentBody = undefined;
+      currentHeaders = dropContentHeaders(currentHeaders);
+    }
+    current = next;
+  }
 }
