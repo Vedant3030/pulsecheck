@@ -4,8 +4,8 @@ WORKDIR /app
 
 COPY package*.json ./
 COPY prisma ./prisma
-RUN npm install
-RUN npx prisma generate
+RUN npm install --unsafe-perm
+RUN npx prisma@7.9.1 generate
 
 COPY . .
 
