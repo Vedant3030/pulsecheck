@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "prisma generate && node --watch-path=./src src/main.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test ./test/chainRunner.test.mjs ./test/runChain.test.mjs"
   },
   "keywords": [],
   "author": "",

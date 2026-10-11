@@ -77,6 +77,8 @@ model Monitor {
   authType                String?
   authHeaderName          String?
   encryptedAuthValue      String?
+  type                    String            @default("single")
+  steps                   MonitorStep[]
 }
 
 model CheckResult {
@@ -88,12 +90,35 @@ model CheckResult {
   responseTimeMs   Int?
   checkedAt        DateTime @default(now())
   assertionResults Json?
+  stepResults      Json?
+}
+
+model MonitorStep {
+  id                 String            @id @default(cuid())
+  monitorId          String
+  monitor            Monitor           @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+  order              Int
+  name               String
+  method             String            @default("GET")
+  url                String
+  requestBody        String?
+  requestHeaders     Json?
+  authType           String?
+  authHeaderName     String?
+  encryptedAuthValue String?
+  extracts           Json?
+  assertions         MonitorAssertion[]
+
+  @@unique([monitorId, order])
+  @@index([monitorId])
 }
 
 model MonitorAssertion {
   id            String            @id @default(cuid())
   monitorId     String
   monitor       Monitor           @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+  stepId        String?
+  step          MonitorStep?      @relation(fields: [stepId], references: [id], onDelete: Cascade)
   type          AssertionType
   field         String?
   operator      AssertionOperator

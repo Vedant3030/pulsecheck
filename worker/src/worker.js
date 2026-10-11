@@ -9,6 +9,7 @@ import { fetchCertExpiry } from "./lib/ssl.js";
 import { fetchDomainExpiry } from "./lib/domain.js";
 import { getExpiryStage, shouldAlert } from "./lib/expiryStage.js";
 import { evaluateAssertions } from "./lib/assertions.js";
+import { runChain } from "./lib/chainRunner.js";
 import { decrypt, requireEncryptionKey } from "./lib/crypto.js";
 import { GuardError, readCappedBody, requestWithRedirects, safeDestroy, sanitizeMessageUrls } from "./lib/ssrfGuard.js";
 
@@ -58,10 +59,100 @@ const { PrismaClient } = pkg;
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma = new PrismaClient({ adapter });
 
+class RequestBuildError extends Error {}
+
+/**
+ * Build fetch parts from a monitor-like source (Monitor row or equivalent).
+ * Shared by single checks and (via deps) chain steps. Throws
+ * RequestBuildError with a log-safe message on bad stored bodies or
+ * undecryptable secrets — never includes secrets or URLs.
+ */
+function buildRequestParts(src) {
+  const VALID_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
+  const rawMethod = typeof src.method === "string" ? src.method.toUpperCase() : "GET";
+  const fetchMethod = VALID_METHODS.has(rawMethod) ? rawMethod : "GET";
+  const headers = { ...(src.requestHeaders && typeof src.requestHeaders === "object" ? src.requestHeaders : {}) };
+  // Worker-set defaults — kept on cross-origin redirect hops, where all
+  // user-configured headers (including auth) are dropped.
+  const defaultHeaders = {};
+  if (!Object.keys(headers).some((k) => k.toLowerCase() === "user-agent")) {
+    headers["User-Agent"] = "PulseCheck/test-request";
+    defaultHeaders["User-Agent"] = "PulseCheck/test-request";
+  }
+  let body;
+  if (typeof src.requestBody === "string" && src.requestBody.trim() !== "" && fetchMethod !== "GET") {
+    // requestBody was validated as JSON at write time; still guard parse here.
+    try {
+      JSON.parse(src.requestBody);
+    } catch {
+      throw new RequestBuildError("stored requestBody is not valid JSON");
+    }
+    body = src.requestBody;
+    if (!Object.keys(headers).some((k) => k.toLowerCase() === "content-type")) {
+      headers["Content-Type"] = "application/json";
+      defaultHeaders["Content-Type"] = "application/json";
+    }
+  }
+  if (src.authType && src.encryptedAuthValue) {
+    let secret;
+    try {
+      secret = decrypt(src.encryptedAuthValue);
+    } catch (err) {
+      throw new RequestBuildError(`auth decrypt failed: ${err.message}`);
+    }
+    if (src.authType === "bearer") {
+      headers["Authorization"] = `Bearer ${secret}`;
+    } else if (src.authType === "apiKey") {
+      headers[src.authHeaderName || "X-API-Key"] = secret;
+    }
+  }
+  return { fetchMethod, headers, defaultHeaders, body };
+}
+
+/**
+ * Send one guarded request (redirects followed, max 5, every hop validated).
+ * Shared by single checks and chain steps. timeoutMs adds an abort signal;
+ * single checks pass none (no worker timeout, Stage A decision).
+ */
+async function sendGuardedHttpRequest(parts, url, timeoutMs) {
+  return requestWithRedirects(
+    url,
+    {
+      method: parts.fetchMethod, headers: parts.headers,
+      keepHeaders: parts.defaultHeaders, body: parts.body,
+      signal: timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined,
+    },
+    5
+  );
+}
+
+/**
+ * Capture a response body for assertions: capped streaming read, or destroy
+ * without reading when the caller needs no body. Shared by both paths.
+ */
+async function captureResponseBody(response, wantBody) {
+  const BODY_CAP = 512 * 1024;
+  if (!wantBody) {
+    // No assertions need the body — destroy without reading. safeDestroy
+    // absorbs the RequestAbortedError undici emits on unconsumed destroy.
+    safeDestroy(response.body);
+    return { bodyText: "", wasTruncated: false };
+  }
+  try {
+    const capped = await readCappedBody(response, BODY_CAP);
+    return {
+      bodyText: capped.text.length > BODY_CAP ? capped.text.slice(0, BODY_CAP) : capped.text,
+      wasTruncated: capped.truncated,
+    };
+  } catch {
+    return { bodyText: "", wasTruncated: false };
+  }
+}
+
 async function checkMonitor(monitorId) {
   const monitor = await prisma.monitor.findUnique({
     where: { id: monitorId },
-    include: { user: true, assertions: true },
+    include: { user: true, assertions: true, steps: { orderBy: { order: "asc" } } },
   });
 
   if (!monitor || !monitor.isActive) {
@@ -75,93 +166,34 @@ async function checkMonitor(monitorId) {
     orderBy: { checkedAt: "desc" },
   });
 
+  if (monitor.type === "chain") {
+    await checkChainMonitor(monitor, previousCheck, Date.now());
+    return;
+  }
+
   const start = Date.now();
   let newStatus;
   let assertionResults = null;
 
-  // ---- Build the richer HTTP request (additive: defaults reproduce old GET) ----
-  const VALID_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
-  const rawMethod = typeof monitor.method === "string" ? monitor.method.toUpperCase() : "GET";
-  const fetchMethod = VALID_METHODS.has(rawMethod) ? rawMethod : "GET";
-  const headers = { ...(monitor.requestHeaders && typeof monitor.requestHeaders === "object" ? monitor.requestHeaders : {}) };
-  // Worker-set defaults — kept on cross-origin redirect hops, where all
-  // user-configured headers (including auth) are dropped.
-  const defaultHeaders = {};
-  if (!Object.keys(headers).some((k) => k.toLowerCase() === "user-agent")) {
-    headers["User-Agent"] = "PulseCheck/test-request";
-    defaultHeaders["User-Agent"] = "PulseCheck/test-request";
-  }
-  let body;
-  if (typeof monitor.requestBody === "string" && monitor.requestBody.trim() !== "" && fetchMethod !== "GET") {
-    // requestBody was validated as JSON at write time; still guard parse here.
-    try {
-      JSON.parse(monitor.requestBody);
-      body = monitor.requestBody;
-      const hasContentType = Object.keys(headers).some((k) => k.toLowerCase() === "content-type");
-      if (!hasContentType) {
-        headers["Content-Type"] = "application/json";
-        defaultHeaders["Content-Type"] = "application/json";
-      }
-    } catch {
-      // Corrupt stored body — treat as failed check rather than crashing.
-      console.log(`[${monitor.name}] FAILED - stored requestBody is not valid JSON`);
-      await prisma.checkResult.create({
-        data: { monitorId: monitor.id, status: "down", statusCode: null, responseTimeMs: Date.now() - start, assertionResults },
-      });
-      return;
-    }
-  }
-  if (monitor.authType && monitor.encryptedAuthValue) {
-    try {
-      const secret = decrypt(monitor.encryptedAuthValue);
-      if (monitor.authType === "bearer") {
-        headers["Authorization"] = `Bearer ${secret}`;
-      } else if (monitor.authType === "apiKey") {
-        headers[monitor.authHeaderName || "X-API-Key"] = secret;
-      }
-    } catch (err) {
-      // Decrypt failure (wrong key / corrupt row) — mark down, never log the secret.
-      console.log(`[${monitor.name}] FAILED - auth decrypt failed: ${err.message}`);
-      await prisma.checkResult.create({
-        data: { monitorId: monitor.id, status: "down", statusCode: null, responseTimeMs: Date.now() - start, assertionResults },
-      });
-      return;
-    }
+  let parts;
+  try {
+    parts = buildRequestParts(monitor);
+  } catch (err) {
+    // Corrupt stored body or undecryptable secret — same DOWN write as before.
+    console.log(`[${monitor.name}] FAILED - ${err.message}`);
+    await prisma.checkResult.create({
+      data: { monitorId: monitor.id, status: "down", statusCode: null, responseTimeMs: Date.now() - start, assertionResults },
+    });
+    return;
   }
 
   try {
-    // Guarded fetch: redirects followed (max 5 hops, uptime semantics
-    // unchanged), every hop validated at resolve time and pinned at connect
-    // time. Blocked targets throw GuardError (or surface EBLOCKED) and land
-    // in the catch below as a normal DOWN — never out of the job.
-    const response = await requestWithRedirects(
-      monitor.url,
-      { method: fetchMethod, headers, keepHeaders: defaultHeaders, body },
-      5
-    );
+    const response = await sendGuardedHttpRequest(parts, monitor.url);
     const responseTimeMs = Date.now() - start;
     const baselineIsUp = response.statusCode >= 200 && response.statusCode < 300;
 
-    // Capture body once for BODY_CONTAINS / JSON_FIELD_EQUALS (512k cap).
-    // Capped streaming read: stops and destroys the stream at the cap, so a
-    // huge body never lands fully in memory. Assertion-less monitors don't
-    // need the body at all — destroy without reading.
-    const BODY_CAP = 512 * 1024;
-    let bodyText = "";
-    let wasTruncated = false;
-    if (monitor.assertions.length > 0) {
-      try {
-        const capped = await readCappedBody(response, BODY_CAP);
-        bodyText = capped.text.length > BODY_CAP ? capped.text.slice(0, BODY_CAP) : capped.text;
-        wasTruncated = capped.truncated;
-      } catch {
-        bodyText = "";
-      }
-    } else {
-      // No assertions need the body — destroy without reading. safeDestroy
-      // absorbs the RequestAbortedError undici emits on unconsumed destroy.
-      safeDestroy(response.body);
-    }
+    // Capture body once for BODY_CONTAINS / JSON_FIELD_EQUALS.
+    const { bodyText, wasTruncated } = await captureResponseBody(response, monitor.assertions.length > 0);
 
     let allAssertionsPass = true;
     if (monitor.assertions.length > 0) {
@@ -239,6 +271,123 @@ async function checkMonitor(monitorId) {
 
   if (shouldAlert) {
     await sendAlertEmail(monitor, newStatus);
+  }
+}
+
+async function checkChainMonitor(monitor, previousCheck, start) {
+  const ordered = [...(monitor.steps || [])].sort((a, b) => a.order - b.order);
+  const stepIdToOrder = new Map(ordered.map((s) => [s.id, s.order]));
+  const assertionsByOrder = new Map();
+  for (const a of monitor.assertions || []) {
+    if (!a.stepId || !stepIdToOrder.has(a.stepId)) continue;
+    const o = stepIdToOrder.get(a.stepId);
+    if (!assertionsByOrder.has(o)) assertionsByOrder.set(o, []);
+    assertionsByOrder.get(o).push(a);
+  }
+
+  // Resolve stored secrets up front (plaintext lives only in this run).
+  const steps = [];
+  for (const s of ordered) {
+    let secret = null;
+    if (s.authType && s.encryptedAuthValue) {
+      try {
+        secret = decrypt(s.encryptedAuthValue);
+      } catch {
+        const failedStepIndex = ordered.indexOf(s);
+        console.log(`[${monitor.name}] chain step "${s.name}" FAILED - stored credential unreadable`);
+        await prisma.checkResult.create({
+          data: {
+            monitorId: monitor.id, status: "down", statusCode: null,
+            responseTimeMs: Date.now() - start, assertionResults: null,
+            stepResults: [{
+              stepIndex: failedStepIndex, name: s.name, status: "down",
+              statusCode: null, responseTimeMs: 0, assertions: [],
+              error: "Stored credential could not be read.",
+            }],
+          },
+        });
+        await sendAlertEmail({ ...monitor, failedStepName: s.name }, "down");
+        return;
+      }
+    }
+    steps.push({
+      order: s.order, name: s.name, method: s.method, url: s.url,
+      requestBody: s.requestBody, requestHeaders: s.requestHeaders,
+      authType: s.authType, authHeaderName: s.authHeaderName, secret,
+      extracts: s.extracts, assertions: assertionsByOrder.get(s.order) || [],
+    });
+  }
+
+  const deps = {
+    evaluate: (assertions, ctx) => evaluateAssertions(assertions, ctx),
+    request: async (req, timeoutMs) => {
+      const method = String(req.method || "GET").toUpperCase();
+      const headers = { ...(req.headers || {}) };
+      const keepHeaders = {};
+      if (!Object.keys(headers).some((k) => k.toLowerCase() === "user-agent")) {
+        headers["User-Agent"] = "PulseCheck/test-request";
+        keepHeaders["User-Agent"] = "PulseCheck/test-request";
+      }
+      const t0 = Date.now();
+      const response = await sendGuardedHttpRequest(
+        { fetchMethod: method, headers, defaultHeaders: keepHeaders, body: req.body },
+        req.url, timeoutMs
+      );
+      const cap = await captureResponseBody(response, true);
+      return {
+        statusCode: response.statusCode, headers: response.headers || {},
+        bodyText: cap.bodyText, wasTruncated: cap.wasTruncated,
+        responseTimeMs: Date.now() - t0,
+      };
+    },
+  };
+
+  let result;
+  try {
+    result = await runChain(steps, deps);
+  } catch (err) {
+    // Backstop: runChain captures step failures itself; anything escaping
+    // here is unexpected — record DOWN with a sanitized message, never throw.
+    const failureReason =
+      err instanceof GuardError || (err && err.code === "EBLOCKED")
+        ? "Request blocked: target is not a public address."
+        : sanitizeMessageUrls(err && err.message ? String(err.message) : "request failed");
+    console.log(`[${monitor.name}] chain FAILED - ${failureReason}`);
+    await prisma.checkResult.create({
+      data: {
+        monitorId: monitor.id, status: "down", statusCode: null,
+        responseTimeMs: Date.now() - start, assertionResults: null, stepResults: [],
+      },
+    });
+    await sendAlertEmail({ ...monitor, failedStepName: null }, "down");
+    return;
+  }
+
+  const totalMs = Date.now() - start;
+  const newStatus = result.status === "up" ? "up" : "down";
+  const lastStep = result.stepResults[result.stepResults.length - 1];
+  const statusCode = result.status === "up"
+    ? (lastStep ? lastStep.statusCode : null)
+    : (result.stepResults[result.failedStepIndex]?.statusCode ?? null);
+  const failedStepName = result.status === "up" ? null : (result.stepResults[result.failedStepIndex]?.name ?? null);
+
+  await prisma.checkResult.create({
+    data: {
+      monitorId: monitor.id, status: newStatus, statusCode,
+      responseTimeMs: totalMs, assertionResults: null, stepResults: result.stepResults,
+    },
+  });
+
+  if (result.status === "up") {
+    console.log(`[${monitor.name}] chain up (${result.stepResults.length} steps, ${totalMs}ms)`);
+  } else {
+    console.log(`[${monitor.name}] chain DOWN at step "${failedStepName}" (${totalMs}ms)`);
+  }
+
+  const isFirstCheck = !previousCheck;
+  const statusChanged = previousCheck && previousCheck.status !== newStatus;
+  if (statusChanged || (isFirstCheck && newStatus === "down")) {
+    await sendAlertEmail({ ...monitor, failedStepName }, newStatus);
   }
 }
 

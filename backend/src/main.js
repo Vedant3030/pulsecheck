@@ -12,8 +12,10 @@ import heartbeatPingRouter from "./routes/heartbeatPing.js";
 import { generateRawToken, hashToken } from "./lib/tokens.js";
 import { sendPasswordResetEmail, sendVerificationEmail } from "./lib/email.js";
 import { decrypt, encrypt, requireEncryptionKey } from "./lib/crypto.js";
-import { validateMonitorRequestFields } from "./lib/monitorValidation.js";
-import { GuardError, guardedRequest, safeDestroy, silenceStreamErrors } from "./lib/ssrfGuard.js";
+import { validateMonitorRequestFields, validateChainDefinition, validateMonitorType, MIN_CHAIN_INTERVAL_MINS } from "./lib/monitorValidation.js";
+import { GuardError, guardedRequest, readCappedBody, requestWithRedirects, safeDestroy, silenceStreamErrors } from "./lib/ssrfGuard.js";
+import { evaluateAssertions } from "./lib/assertions.js";
+import { runChain, STEP_TIMEOUT_MS } from "./lib/chainRunner.js";
 
 // Fail fast if ENCRYPTION_KEY is missing/malformed (names exactly what's wrong).
 try {
@@ -24,8 +26,109 @@ try {
 }
 
 function toMonitorResponse(monitor) {
-  const { encryptedAuthValue, ...rest } = monitor;
-  return { ...rest, hasAuth: !!encryptedAuthValue };
+  const { encryptedAuthValue, steps, ...rest } = monitor;
+  return {
+    ...rest,
+    hasAuth: !!encryptedAuthValue,
+    ...(Array.isArray(steps) ? { steps: steps.map(toStepResponse) } : {}),
+  };
+}
+
+function toStepResponse(step) {
+  const { encryptedAuthValue, ...rest } = step || {};
+  return { ...rest, hasAuth: !!(step && step.encryptedAuthValue) };
+}
+
+/**
+ * Resolve a chain step's secret for create/update.
+ * Explicit authValue always wins (encrypted). Otherwise, on update, an
+ * id-matched stored secret is kept when authType is unchanged; authType
+ * None (or absent auth) clears. Never logs or returns secrets.
+ */
+function resolveStepSecret(s, existingById) {
+  const existing = s.id && existingById ? existingById.get(s.id) : null;
+  if (s.authType) {
+    if (typeof s.authValue === "string" && s.authValue.length > 0) {
+      if (Buffer.byteLength(s.authValue, "utf8") > 2000) {
+        return { error: `Step "${s.name}": authValue exceeds 2000 chars` };
+      }
+      return { clean: { encryptedAuthValue: encrypt(s.authValue) } };
+    }
+    if (existing && existing.authType === s.authType && existing.encryptedAuthValue) {
+      return { clean: { encryptedAuthValue: existing.encryptedAuthValue } };
+    }
+    return { error: `Step "${s.name}": authValue is required when authType is set` };
+  }
+  if (typeof s.authValue === "string" && s.authValue.length > 0) {
+    return { error: `Step "${s.name}": authType is required when authValue is set` };
+  }
+  return { clean: { encryptedAuthValue: null } };
+}
+
+/**
+ * Validate nested per-step assertions and build Prisma payloads.
+ * existingById matches update steps to stored secrets by step id.
+ * Returns { steps: [step creates], assertionsByIndex: [[assertion creates]] }.
+ * Assertion creates still need monitorId + stepId, attached by the caller
+ * after rows exist (nested-nested creates can't fill both relations).
+ */
+function buildStepCreates(cleanSteps, existingById) {
+  const steps = [];
+  const assertionsByIndex = [];
+  for (const s of cleanSteps) {
+    const sec = resolveStepSecret(s, existingById);
+    if (sec.error) return { error: sec.error };
+    const assertionCreates = [];
+    for (const a of s.assertions || []) {
+      const ae = validateAssertionInput(a);
+      if (ae) return { error: `Step "${s.name}" assertion: ${ae}` };
+      assertionCreates.push({
+        type: a.type,
+        field: a.type === "JSON_FIELD_EQUALS" ? String(a.field).trim() : null,
+        operator: a.operator,
+        expectedValue: String(a.expectedValue),
+      });
+    }
+    steps.push({
+      order: s.order,
+      name: s.name,
+      method: s.method,
+      url: s.url,
+      requestBody: s.requestBody,
+      requestHeaders: s.requestHeaders,
+      authType: s.authType,
+      authHeaderName: s.authType === "apiKey" ? s.authHeaderName : null,
+      encryptedAuthValue: sec.clean.encryptedAuthValue,
+      extracts: s.extracts,
+    });
+    assertionsByIndex.push(assertionCreates);
+  }
+  return { clean: { steps, assertionsByIndex } };
+}
+
+/** Persist steps + per-step assertions for a monitor inside a transaction. */
+async function replaceMonitorSteps(tx, monitorId, stepPayload) {
+  await tx.monitorAssertion.deleteMany({ where: { monitorId } });
+  await tx.monitorStep.deleteMany({ where: { monitorId } });
+  await tx.monitorStep.createMany({ data: stepPayload.steps.map((s) => ({ ...s, monitorId })) });
+  const saved = await tx.monitorStep.findMany({ where: { monitorId } });
+  const orderToId = new Map(saved.map((s) => [s.order, s.id]));
+  for (let i = 0; i < stepPayload.steps.length; i++) {
+    for (const a of stepPayload.assertionsByIndex[i]) {
+      await tx.monitorAssertion.create({
+        data: { ...a, monitorId, stepId: orderToId.get(i) },
+      });
+    }
+  }
+}
+
+async function fetchFullMonitor(id) {
+  return prisma.monitor.findUnique({
+    where: { id },
+    include: {
+      steps: { include: { assertions: true }, orderBy: { order: "asc" } },
+    },
+  });
 }
 
 const { PrismaClient } = pkg;
@@ -62,6 +165,16 @@ const testRequestLimiter = rateLimit({
   legacyHeaders: false,
   keyGenerator: (req) => req.userId || ipKeyGenerator(req.ip),
   message: { ok: false, code: "rate_limited", message: "Too many test requests — please wait a minute and try again." },
+});
+
+// Stricter limiter for whole-chain dry-runs (up to 5 upstream requests each).
+const chainTestLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 4,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.userId || ipKeyGenerator(req.ip),
+  message: { ok: false, code: "rate_limited", message: "Too many chain test requests — please wait a minute and try again." },
 });
 
 // Support multiple allowed origins (local dev + production), comma-separated
@@ -544,6 +657,55 @@ app.post("/monitors", requireAuth, async (req, res) => {
       return res.status(400).json({ error: "Check interval must be at least 1 minute." });
     }
 
+    const { error: typeError, clean: typeClean } = validateMonitorType(req.body.type);
+    if (typeError) {
+      return res.status(400).json({ error: typeError });
+    }
+    if (typeClean !== "chain" && req.body.steps !== undefined) {
+      return res.status(400).json({ error: "steps require type \"chain\"" });
+    }
+
+    // ---- Chain monitors: ordered steps with per-step assertions ----
+    if (typeClean === "chain") {
+      const parsedMins = intervalMins != null ? Number(intervalMins) : 5;
+      const mins = Number.isFinite(parsedMins) ? parsedMins : 5;
+      if (mins < MIN_CHAIN_INTERVAL_MINS) {
+        return res.status(400).json({ error: `Chain monitors must be checked at most every ${MIN_CHAIN_INTERVAL_MINS} minutes.` });
+      }
+      const vc = validateChainDefinition(req.body.steps);
+      if (vc.error) {
+        return res.status(400).json({ error: vc.error });
+      }
+      const built = buildStepCreates(vc.clean.steps, new Map());
+      if (built.error) {
+        return res.status(400).json({ error: built.error });
+      }
+      const first = vc.clean.steps[0];
+      const created = await prisma.$transaction(async (tx) => {
+        const m = await tx.monitor.create({
+          data: {
+            url: first.url,
+            name,
+            method: first.method,
+            intervalMins: mins,
+            userId: req.userId,
+            type: "chain",
+          },
+        });
+        await replaceMonitorSteps(tx, m.id, built.clean);
+        return m;
+      });
+
+      await monitorQueue.upsertJobScheduler(
+        `monitor-${created.id}`,
+        { every: created.intervalMins * 60 * 1000 },
+        { name: "check-monitor", data: { monitorId: created.id } }
+      );
+
+      res.status(201).json(toMonitorResponse(await fetchFullMonitor(created.id)));
+      return;
+    }
+
     const { error, clean } = validateMonitorRequestFields(req.body);
     if (error) {
       return res.status(400).json({ error });
@@ -569,6 +731,7 @@ app.post("/monitors", requireAuth, async (req, res) => {
         name,
         intervalMins: intervalMins || 5,
         userId: req.userId,
+        type: "single",
         method: clean.method || "GET",
         requestBody: clean.requestBody ?? null,
         requestHeaders: clean.requestHeaders ?? null,
@@ -772,6 +935,144 @@ app.post("/monitors/test", requireAuth, testRequestLimiter, async (req, res) => 
   }
 });
 
+// POST /monitors/test-chain — dry-run a whole chain from the form.
+// Body: { steps: [...same shape as monitor steps, each with optional
+// authValue and assertions...], monitorId? }. Per-step results carry a 2KB
+// body preview and extract NAMES only (values masked). Extracted values,
+// secrets, and response bodies are never returned, stored, or logged.
+app.post("/monitors/test-chain", requireAuth, chainTestLimiter, async (req, res) => {
+  try {
+    const { steps, monitorId } = req.body;
+    const vc = validateChainDefinition(steps);
+    if (vc.error) {
+      return res.status(400).json({ ok: false, code: "invalid_input", message: vc.error });
+    }
+
+    // Stored-secret fallback, matched by step index: explicit authValue wins;
+    // otherwise the stored secret of the same-index step is used (ownership
+    // checked). Neither plaintext nor ciphertext ever leaves the server.
+    let storedSecrets = [];
+    if (monitorId) {
+      const monitor = await prisma.monitor.findUnique({
+        where: { id: String(monitorId) },
+        include: { steps: { orderBy: { order: "asc" } } },
+      });
+      if (!monitor || monitor.userId !== req.userId) {
+        return res.status(404).json({ ok: false, code: "not_found", message: "Monitor not found." });
+      }
+      storedSecrets = (monitor.steps || []).map((s) => ({
+        authType: s.authType, encryptedAuthValue: s.encryptedAuthValue,
+      }));
+    }
+
+    const runSteps = [];
+    for (let i = 0; i < vc.clean.steps.length; i++) {
+      const s = vc.clean.steps[i];
+      const assayed = [];
+      for (const a of s.assertions || []) {
+        const ae = validateAssertionInput(a);
+        if (ae) {
+          return res.status(400).json({ ok: false, code: "invalid_input", message: `Step "${s.name}" assertion: ${ae}` });
+        }
+        assayed.push(a);
+      }
+      let secret = null;
+      if (s.authType) {
+        if (typeof s.authValue === "string" && s.authValue.length > 0) {
+          if (Buffer.byteLength(s.authValue, "utf8") > 2000) {
+            return res.status(400).json({ ok: false, code: "invalid_input", message: `Step "${s.name}": authValue exceeds 2000 chars` });
+          }
+          secret = s.authValue;
+        } else {
+          const stored = storedSecrets[i];
+          if (!stored || stored.authType !== s.authType || !stored.encryptedAuthValue) {
+            return res.status(400).json({ ok: false, code: "invalid_input", message: `Step "${s.name}": authValue is required when authType is set` });
+          }
+          try {
+            secret = decrypt(stored.encryptedAuthValue);
+          } catch {
+            return res.status(400).json({ ok: false, code: "invalid_input", message: `Step "${s.name}": the stored credential could not be read. Re-enter the secret and try again.` });
+          }
+        }
+      } else if (typeof s.authValue === "string" && s.authValue.length > 0) {
+        return res.status(400).json({ ok: false, code: "invalid_input", message: `Step "${s.name}": authType is required when authValue is set` });
+      }
+      runSteps.push({ ...s, secret, assertions: assayed });
+    }
+
+    const startedAt = Date.now();
+    // Per-step 2KB previews, collected in call order (runChain is strictly
+    // sequential). Values themselves stay masked — names + flags only.
+    const previews = [];
+    const deps = {
+      evaluate: (assertions, ctx) => evaluateAssertions(assertions, ctx),
+      request: async (stepReq, timeoutMs) => {
+        const headers = { ...(stepReq.headers || {}) };
+        if (!Object.keys(headers).some((k) => k.toLowerCase() === "user-agent")) {
+          headers["User-Agent"] = "PulseCheck/test-request";
+        }
+        const t0 = Date.now();
+        const upstream = await requestWithRedirects(
+          stepReq.url,
+          {
+            method: stepReq.method, headers,
+            keepHeaders: { "User-Agent": headers["User-Agent"] },
+            body: stepReq.body, signal: AbortSignal.timeout(timeoutMs || STEP_TIMEOUT_MS),
+          },
+          5
+        );
+        // 512KB capture for assertions/extracts; 2KB preview for the panel.
+        silenceStreamErrors(upstream.body);
+        const capped = await readCappedBody(upstream, 512 * 1024);
+        previews.push({ bodyPreview: capped.text.slice(0, 2048), bodyTruncated: capped.truncated || capped.text.length > 2048 });
+        return {
+          statusCode: upstream.statusCode, headers: upstream.headers || {},
+          bodyText: capped.text, wasTruncated: capped.truncated,
+          responseTimeMs: Date.now() - t0,
+        };
+      },
+    };
+
+    let result;
+    try {
+      result = await runChain(runSteps, deps);
+    } catch (err) {
+      const mapped = mapTestError(err);
+      console.log(`[chain-test] user=${req.userId} chain(${runSteps.length} steps) -> ${mapped.code} (${Date.now() - startedAt}ms)`);
+      return res.json({ ok: false, code: mapped.code, message: mapped.message });
+    }
+
+    // Previews align by call order: runChain runs steps strictly in order
+    // and stops at the first failure, so previews[i] belongs to step i.
+    // A step that never ran (stopped chain) gets a null preview.
+    const panelSteps = result.stepResults.map((sr) => ({
+      stepIndex: sr.stepIndex,
+      name: sr.name,
+      status: sr.status,
+      statusCode: sr.statusCode,
+      responseTimeMs: sr.responseTimeMs,
+      error: sr.error,
+      assertions: sr.assertions || [],
+      extracts: (sr.extracts || []).map((e) => ({ variable: e.variable, extracted: !!e.extracted })),
+      bodyPreview: previews[sr.stepIndex] ? previews[sr.stepIndex].bodyPreview : null,
+      bodyTruncated: previews[sr.stepIndex] ? !!previews[sr.stepIndex].bodyTruncated : false,
+    }));
+
+    const failedName = result.status === "up" ? null : (result.stepResults[result.failedStepIndex]?.name ?? null);
+    console.log(`[chain-test] user=${req.userId} chain(${runSteps.length} steps) -> ${result.status}${failedName ? ` step "${failedName}"` : ""} (${Date.now() - startedAt}ms)`);
+
+    res.json({
+      ok: true,
+      status: result.status,
+      failedStepIndex: result.failedStepIndex,
+      steps: panelSteps,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, code: "upstream_error", message: "Something went wrong" });
+  }
+});
+
 // READ all monitors for the logged-in user (includes latest check status)
 app.get("/monitors", requireAuth, async (req, res) => {
   try {
@@ -782,6 +1083,10 @@ app.get("/monitors", requireAuth, async (req, res) => {
         checks: {
           orderBy: { checkedAt: "desc" },
           take: 1,
+        },
+        steps: {
+          include: { assertions: true },
+          orderBy: { order: "asc" },
         },
       },
     });
@@ -795,10 +1100,13 @@ app.get("/monitors", requireAuth, async (req, res) => {
         intervalMins: monitor.intervalMins,
         isActive: monitor.isActive,
         createdAt: monitor.createdAt,
+        type: monitor.type ?? "single",
+        steps: (monitor.steps || []).map(toStepResponse),
         status: latest?.status === "up" ? "up" : "down",
         responseTimeMs: latest?.responseTimeMs ?? null,
         statusCode: latest?.statusCode ?? null,
         checkedAt: latest?.checkedAt ?? null,
+        stepResults: latest?.stepResults ?? null,
         sslMonitoringEnabled: monitor.sslMonitoringEnabled,
         certExpiresAt: monitor.certExpiresAt,
         lastSslCheckAt: monitor.lastSslCheckAt,
@@ -920,11 +1228,27 @@ app.post("/monitors/:id/assertions", requireAuth, async (req, res) => {
     const error = validateAssertionInput(req.body);
     if (error) return res.status(400).json({ error });
 
-    const { type, field, operator, expectedValue } = req.body;
+    const { type, field, operator, expectedValue, stepId } = req.body;
+
+    // stepId links an assertion to one chain step. Single monitors must not
+    // send it; chain monitors must send a stepId belonging to this monitor.
+    let step = null;
+    if (stepId !== undefined && stepId !== null && String(stepId).trim() !== "") {
+      if ((monitor.type || "single") !== "chain") {
+        return res.status(400).json({ error: "stepId is only allowed on chain monitors" });
+      }
+      step = await prisma.monitorStep.findUnique({ where: { id: String(stepId) } });
+      if (!step || step.monitorId !== id) {
+        return res.status(404).json({ error: "Step not found" });
+      }
+    } else if ((monitor.type || "single") === "chain") {
+      return res.status(400).json({ error: "stepId is required on chain monitors" });
+    }
 
     const assertion = await prisma.monitorAssertion.create({
       data: {
         monitorId: id,
+        stepId: step ? step.id : null,
         type,
         field: type === "JSON_FIELD_EQUALS" ? String(field).trim() : null,
         operator,
@@ -1008,6 +1332,58 @@ app.put("/monitors/:id", requireAuth, async (req, res) => {
     if (sslMonitoringEnabled !== undefined) data.sslMonitoringEnabled = sslMonitoringEnabled;
     if (domainMonitoringEnabled !== undefined) data.domainMonitoringEnabled = domainMonitoringEnabled;
 
+    const { error: typeError, clean: typeClean } = validateMonitorType(req.body.type);
+    if (typeError) {
+      return res.status(400).json({ error: typeError });
+    }
+    const effectiveType = "type" in req.body ? typeClean : (monitor.type || "single");
+    if ("type" in req.body) data.type = effectiveType;
+    if ("steps" in req.body && effectiveType !== "chain") {
+      return res.status(400).json({ error: "steps require type \"chain\"" });
+    }
+    const effectiveInterval = "intervalMins" in req.body && req.body.intervalMins != null
+      ? Number(req.body.intervalMins)
+      : monitor.intervalMins;
+    if (effectiveType === "chain" && effectiveInterval < MIN_CHAIN_INTERVAL_MINS) {
+      return res.status(400).json({ error: `Chain monitors must be checked at most every ${MIN_CHAIN_INTERVAL_MINS} minutes.` });
+    }
+
+    // ---- Chain steps replacement (transactional with the monitor update) ----
+    let chainStepPayload = null;
+    let switchingToSingle = false;
+    if (effectiveType === "chain" && "steps" in req.body) {      const vc = validateChainDefinition(req.body.steps);
+      if (vc.error) {
+        return res.status(400).json({ error: vc.error });
+      }
+      const existingSteps = await prisma.monitorStep.findMany({ where: { monitorId: id } });
+      const existingById = new Map(existingSteps.map((s) => [s.id, s]));
+      for (const s of vc.clean.steps) {
+        if (s.id && !existingById.has(s.id)) {
+          return res.status(400).json({ error: `Step "${s.name}": unknown step id` });
+        }
+      }
+      const built = buildStepCreates(vc.clean.steps, existingById);
+      if (built.error) {
+        return res.status(400).json({ error: built.error });
+      }
+      chainStepPayload = built.clean;
+      // Keep the Monitor row mirrored to step 1 for lists/status pages.
+      data.url = vc.clean.steps[0].url;
+      data.method = vc.clean.steps[0].method;
+    } else if (effectiveType === "chain") {
+      // No step replacement — but a chain with zero stored steps is invalid
+      // (e.g. switching single→chain without providing steps).
+      const existingCount = await prisma.monitorStep.count({ where: { monitorId: id } });
+      if (existingCount === 0) {
+        return res.status(400).json({ error: "steps are required for chain monitors" });
+      }
+    } else if (effectiveType === "single" && monitor.type === "chain") {
+      switchingToSingle = true;
+      if (!("url" in req.body) || !req.body.url) {
+        return res.status(400).json({ error: "url is required when switching to a single request monitor" });
+      }
+    }
+
     // --- HTTP request fields (shared strict validation) ---
     const REQUEST_KEYS = ["method", "requestBody", "requestHeaders", "authType", "authHeaderName", "authValue"];
     const touchesRequest = REQUEST_KEYS.some((k) => k in req.body);
@@ -1065,10 +1441,25 @@ app.put("/monitors/:id", requireAuth, async (req, res) => {
       }
     }
 
-    const updated = await prisma.monitor.update({
-      where: { id },
-      data,
-    });
+    let updated;
+    if (chainStepPayload) {
+      updated = await prisma.$transaction(async (tx) => {
+        const m = await tx.monitor.update({ where: { id }, data });
+        await replaceMonitorSteps(tx, id, chainStepPayload);
+        return m;
+      });
+    } else if (switchingToSingle) {
+      updated = await prisma.$transaction(async (tx) => {
+        await tx.monitorAssertion.deleteMany({ where: { monitorId: id } });
+        await tx.monitorStep.deleteMany({ where: { monitorId: id } });
+        return tx.monitor.update({ where: { id }, data });
+      });
+    } else {
+      updated = await prisma.monitor.update({
+        where: { id },
+        data,
+      });
+    }
 
     // Re-add it only if still active
     if (updated.isActive) {
@@ -1106,7 +1497,7 @@ app.put("/monitors/:id", requireAuth, async (req, res) => {
       await sslDomainQueue.removeJobScheduler(`ssl-domain-check-${updated.id}`);
     }
 
-    res.json(toMonitorResponse(updated));
+    res.json(toMonitorResponse(await fetchFullMonitor(updated.id)));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Something went wrong" });

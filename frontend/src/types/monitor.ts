@@ -7,6 +7,39 @@ export type MonitorMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 export type MonitorAuthType = "bearer" | "apiKey";
 
+export type MonitorType = "single" | "chain";
+
+export interface MonitorExtractRule {
+  variable: string;
+  source: "body" | "header" | "status";
+  path: string | null;
+}
+
+export interface MonitorStep {
+  id: string;
+  order: number;
+  name: string;
+  method: MonitorMethod;
+  url: string;
+  requestBody: string | null;
+  requestHeaders: Record<string, string> | null;
+  authType: MonitorAuthType | null;
+  authHeaderName: string | null;
+  /** True when a secret is stored. The secret itself is never returned. */
+  hasAuth: boolean;
+  extracts: MonitorExtractRule[];
+  assertions?: MonitorAssertion[];
+}
+
+export interface StepResultSummary {
+  stepIndex: number;
+  name: string;
+  status: MonitorStatus;
+  statusCode: number | null;
+  responseTimeMs: number | null;
+  error: string | null;
+}
+
 export interface Monitor {
   id: string;
   name: string;
@@ -33,6 +66,10 @@ export interface Monitor {
   authHeaderName: string | null;
   /** True when a secret is stored. The secret itself is never returned. */
   hasAuth: boolean;
+  type: MonitorType;
+  steps: MonitorStep[];
+  /** Per-step summary of the latest check (chain monitors only). */
+  stepResults: StepResultSummary[] | null;
 }
 
 /** One ping result — from GET /monitors/:id/checks */
@@ -61,6 +98,8 @@ export type AssertionOperator =
 export interface MonitorAssertion {
   id: string;
   monitorId: string;
+  /** Null for single-request monitors; set for chain step assertions. */
+  stepId: string | null;
   type: AssertionType;
   field: string | null;
   operator: AssertionOperator;

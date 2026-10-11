@@ -25,7 +25,7 @@ export interface SignupResponse {
 
 export interface MonitorInput {
   name: string;
-  url: string;
+  url?: string;
   intervalMins: number;
   isActive?: boolean;
   method?: string;
@@ -35,6 +35,29 @@ export interface MonitorInput {
   authHeaderName?: string | null;
   /** Write-only plaintext secret. Never returned by the API. Omit to keep existing. */
   authValue?: string;
+  type?: string;
+  steps?: ChainStepInput[];
+}
+
+export interface ChainExtractInput {
+  variable: string;
+  source: string;
+  path: string | null;
+}
+
+export interface ChainStepInput {
+  id?: string;
+  name: string;
+  method?: string;
+  url: string;
+  requestBody?: string | null;
+  requestHeaders?: Record<string, string> | null;
+  authType?: string | null;
+  authHeaderName?: string | null;
+  /** Write-only plaintext secret. Omit (with step id) to keep the stored one. */
+  authValue?: string;
+  extracts?: ChainExtractInput[];
+  assertions?: AssertionInput[];
 }
 
 async function parseError(res: Response): Promise<string> {
@@ -245,6 +268,45 @@ export interface AssertionInput {
   field?: string | null;
   operator: AssertionOperator;
   expectedValue: string;
+  stepId?: string | null;
+}
+
+export interface ChainTestStepResult {
+  stepIndex: number;
+  name: string;
+  status: "up" | "down";
+  statusCode: number | null;
+  responseTimeMs: number | null;
+  error: string | null;
+  assertions: import("@/types/monitor").AssertionResult[];
+  /** Extract names only — values are never returned. */
+  extracts: { variable: string; extracted: boolean }[];
+  bodyPreview: string | null;
+  bodyTruncated: boolean;
+}
+
+export interface ChainTestSuccess {
+  ok: true;
+  status: "up" | "down";
+  failedStepIndex: number | null;
+  steps: ChainTestStepResult[];
+}
+
+export type ChainTestResult = ChainTestSuccess | TestRequestFailure;
+
+/** Whole-chain dry-run. Guard/network outcomes per step; only bad input/auth/rate-limit throw. */
+export async function testChainRequest(input: { steps: ChainStepInput[]; monitorId?: string }): Promise<ChainTestResult> {
+  const res = await apiFetch("/monitors/test-chain", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  await ensureAuthed(res);
+
+  if (!res.ok) {
+    throw new Error(await parseError(res));
+  }
+
+  return (await res.json()) as ChainTestResult;
 }
 
 export async function fetchAssertions(

@@ -47,9 +47,16 @@ export async function sendAlertEmail(target, newStatus, kind = "monitor") {
   }
 
   const isDown = status === "down";
+  // Chain monitors may carry a failing step NAME only — never URLs (which
+  // may contain query strings), variable values, or response content.
+  const failedStepName = typeof target.failedStepName === "string" && target.failedStepName !== ""
+    ? target.failedStepName
+    : null;
 
   const identifier = target.url || (target.slug ? `slug:${target.slug}` : target.name);
-  const subject = isDown ? `🔴 ${target.name} is DOWN` : `🟢 ${target.name} is back UP`;
+  const subject = isDown
+    ? (failedStepName ? `🔴 ${target.name} is DOWN — step "${failedStepName}" failed` : `🔴 ${target.name} is DOWN`)
+    : `🟢 ${target.name} is back UP`;
 
   let body;
   if (kind === "heartbeat") {
@@ -58,7 +65,9 @@ export async function sendAlertEmail(target, newStatus, kind = "monitor") {
       : `Your heartbeat monitor "${target.name}" (slug: ${target.slug}) has recovered.`;
   } else {
     body = isDown
-      ? `Your monitor "${target.name}" (${target.url}) just went down.`
+      ? (failedStepName
+        ? `Your monitor "${target.name}" (${target.url}) just went down. Failing step: "${failedStepName}".`
+        : `Your monitor "${target.name}" (${target.url}) just went down.`)
       : `Your monitor "${target.name}" (${target.url}) has recovered.`;
   }
 
