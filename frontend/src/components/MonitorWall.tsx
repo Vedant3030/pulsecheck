@@ -10,7 +10,7 @@ import { LogoutButton } from "@/components/LogoutButton";
 import { MonitorBayEmpty } from "@/components/MonitorBayEmpty";
 import { WaveformStrip } from "@/components/WaveformStrip";
 import { ChainStepChips } from "@/components/ChainStepChips";
-import { ThemeToggle } from "@/components/ThemeToggle";
+import { ModeToggle } from "@/components/ModeToggle";
 import { LayoutDashboard, Radio, Clock3, Settings } from "lucide-react";
 import { MonitorBaySkeleton } from "@/components/ui/Skeleton";
 import { AppBrand } from "@/components/ui/AppBrand";
@@ -129,7 +129,7 @@ return (
                  <p className="text-[var(--text-main)]">{getEmail() ?? "operator"}</p>
                  <p className="mt-1 text-[var(--text-muted)]">{lastUpdated ? `Updated ${lastUpdated.toLocaleTimeString("en-US", { hour12: false })}` : "Connecting…"}</p>
                </div>
-               <ThemeToggle />
+               <ModeToggle />
                <Link href="/manage" className="rounded-md border border-grid px-3 py-2 text-xs font-medium text-[var(--text-main)] transition hover:border-phosphor hover:bg-bg-strip">Manage</Link>
                <LogoutButton className="text-xs font-medium text-[var(--text-muted)] transition hover:text-[var(--text-main)]" />
              </div>

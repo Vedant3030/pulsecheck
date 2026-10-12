@@ -21,4 +21,5 @@ export interface UserProfile {
   createdAt: string;
   publicSlug: string | null;
   emailVerified: boolean;
+  plan: string;
 }

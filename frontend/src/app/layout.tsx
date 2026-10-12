@@ -14,18 +14,6 @@ export const metadata: Metadata = {
   description: "Uptime monitoring — ICU-style status wall",
 };
 
-// Dark is the default. Light applies only when the user explicitly chose it.
-const themeInitScript = `
-(function () {
-  try {
-    var stored = localStorage.getItem("pulsecheck-theme");
-    if (stored === "light") {
-      document.documentElement.classList.add("light");
-    }
-  } catch (e) {}
-})();
-`;
-
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -33,9 +21,6 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className={jetbrainsMono.variable}>
-      <head>
-        <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
-      </head>
       <body className="flex min-h-screen flex-col antialiased">
         <div className="flex-1">{children}</div>
         <footer className="border-t border-grid bg-bg-panel px-5 py-4 text-center text-xs text-[var(--text-muted)]">

@@ -13,6 +13,17 @@ import { generateRawToken, hashToken } from "./lib/tokens.js";
 import { sendPasswordResetEmail, sendVerificationEmail } from "./lib/email.js";
 import { decrypt, encrypt, requireEncryptionKey } from "./lib/crypto.js";
 import { validateMonitorRequestFields, validateChainDefinition, validateMonitorType, MIN_CHAIN_INTERVAL_MINS } from "./lib/monitorValidation.js";
+import { planLimits, upgradeMessage } from "./lib/plans.js";
+
+/** Load the caller's plan ("free" default for missing/unknown). */
+async function getUserPlan(userId) {
+  try {
+    const user = await prisma.user.findUnique({ where: { id: userId }, select: { plan: true } });
+    return user && user.plan ? user.plan : "free";
+  } catch {
+    return "free";
+  }
+}
 import { GuardError, guardedRequest, readCappedBody, requestWithRedirects, safeDestroy, silenceStreamErrors } from "./lib/ssrfGuard.js";
 import { evaluateAssertions } from "./lib/assertions.js";
 import { runChain, STEP_TIMEOUT_MS } from "./lib/chainRunner.js";
@@ -370,7 +381,7 @@ app.post("/login", authLimiter, async (req, res) => {
 app.get("/me", requireAuth, async (req, res) => {
   const user = await prisma.user.findUnique({
     where: { id: req.userId },
-    select: { id: true, email: true, createdAt: true, publicSlug: true, emailVerified: true },
+    select: { id: true, email: true, createdAt: true, publicSlug: true, emailVerified: true, plan: true },
   });
   if (!user) {
     return res.status(404).json({ error: "User not found" });
@@ -387,7 +398,7 @@ app.put("/me/public-slug", requireAuth, async (req, res) => {
       const user = await prisma.user.update({
         where: { id: req.userId },
         data: { publicSlug: null },
-        select: { id: true, email: true, createdAt: true, publicSlug: true, emailVerified: true },
+        select: { id: true, email: true, createdAt: true, publicSlug: true, emailVerified: true, plan: true },
       });
       return res.json(user);
     }
@@ -408,7 +419,7 @@ app.put("/me/public-slug", requireAuth, async (req, res) => {
     const user = await prisma.user.update({
         where: { id: req.userId },
         data: { publicSlug: slug },
-        select: { id: true, email: true, createdAt: true, publicSlug: true, emailVerified: true },
+        select: { id: true, email: true, createdAt: true, publicSlug: true, emailVerified: true, plan: true },
       });
 
     res.json(user);
@@ -657,6 +668,19 @@ app.post("/monitors", requireAuth, async (req, res) => {
       return res.status(400).json({ error: "Check interval must be at least 1 minute." });
     }
 
+    // ---- Plan limits (server-side; the UI gates are convenience only) ----
+    const userPlan = await getUserPlan(req.userId);
+    const limits = planLimits(userPlan);
+    const planLabel = userPlan === "pro" ? "Pro" : "Free";
+    const requestedMins = intervalMins != null ? Number(intervalMins) : 5;
+    if (Number.isFinite(requestedMins) && requestedMins < limits.minIntervalMins) {
+      return res.status(403).json({ error: `The ${planLabel} plan checks every ${limits.minIntervalMins} minutes or slower. ${userPlan === "pro" ? "" : "Upgrade to Pro for faster checks."}` });
+    }
+    const monitorCount = await prisma.monitor.count({ where: { userId: req.userId } });
+    if (monitorCount >= limits.maxMonitors) {
+      return res.status(403).json({ error: `Plan limit reached: up to ${limits.maxMonitors} monitors. ${upgradeMessage("More monitors")}` });
+    }
+
     const { error: typeError, clean: typeClean } = validateMonitorType(req.body.type);
     if (typeError) {
       return res.status(400).json({ error: typeError });
@@ -667,6 +691,9 @@ app.post("/monitors", requireAuth, async (req, res) => {
 
     // ---- Chain monitors: ordered steps with per-step assertions ----
     if (typeClean === "chain") {
+      if (!limits.allowChain) {
+        return res.status(403).json({ error: upgradeMessage("Multi-step chains") });
+      }
       const parsedMins = intervalMins != null ? Number(intervalMins) : 5;
       const mins = Number.isFinite(parsedMins) ? parsedMins : 5;
       if (mins < MIN_CHAIN_INTERVAL_MINS) {
@@ -1225,6 +1252,12 @@ app.post("/monitors/:id/assertions", requireAuth, async (req, res) => {
       return res.status(404).json({ error: "Monitor not found" });
     }
 
+    const assertionLimits = planLimits(await getUserPlan(req.userId));
+    const assertionCount = await prisma.monitorAssertion.count({ where: { monitorId: id } });
+    if (assertionCount >= assertionLimits.maxAssertionsPerMonitor) {
+      return res.status(403).json({ error: `Plan limit reached: up to ${assertionLimits.maxAssertionsPerMonitor} assertions per monitor. ${upgradeMessage("More assertions")}` });
+    }
+
     const error = validateAssertionInput(req.body);
     if (error) return res.status(400).json({ error });
 
@@ -1341,9 +1374,27 @@ app.put("/monitors/:id", requireAuth, async (req, res) => {
     if ("steps" in req.body && effectiveType !== "chain") {
       return res.status(400).json({ error: "steps require type \"chain\"" });
     }
+    // ---- Plan limits: freeze, don't break. Existing over-limit rows stay
+    // runnable/editable; only *new* upgrades (faster interval, adding or
+    // switching to chains) are gated. ----
+    const putPlan = await getUserPlan(req.userId);
+    const limits = planLimits(putPlan);
+    const planLabel = putPlan === "pro" ? "Pro" : "Free";
+    const switchingToChain = effectiveType === "chain" && monitor.type !== "chain";
+    if ((switchingToChain || ("steps" in req.body && effectiveType === "chain")) && !limits.allowChain) {
+      return res.status(403).json({ error: upgradeMessage("Multi-step chains") });
+    }
     const effectiveInterval = "intervalMins" in req.body && req.body.intervalMins != null
       ? Number(req.body.intervalMins)
       : monitor.intervalMins;
+    if (
+      "intervalMins" in req.body && req.body.intervalMins != null &&
+      Number.isFinite(Number(req.body.intervalMins)) &&
+      Number(req.body.intervalMins) !== monitor.intervalMins &&
+      Number(req.body.intervalMins) < limits.minIntervalMins
+    ) {
+      return res.status(403).json({ error: `The ${planLabel} plan checks every ${limits.minIntervalMins} minutes or slower. Upgrade to Pro for faster checks.` });
+    }
     if (effectiveType === "chain" && effectiveInterval < MIN_CHAIN_INTERVAL_MINS) {
       return res.status(400).json({ error: `Chain monitors must be checked at most every ${MIN_CHAIN_INTERVAL_MINS} minutes.` });
     }

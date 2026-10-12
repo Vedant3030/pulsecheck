@@ -17,6 +17,9 @@ model User {
   password               String
   publicSlug             String?                  @unique
   emailVerified          Boolean                  @default(false)
+  plan                   String                   @default("free")
+  stripeCustomerId       String?
+  subscriptionStatus     String?
   createdAt              DateTime                 @default(now())
   monitors               Monitor[]
   heartbeatMonitors      HeartbeatMonitor[]

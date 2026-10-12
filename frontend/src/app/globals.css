@@ -10,32 +10,8 @@
   pulls from one source of truth. Tailwind v4 reads them via @theme.
 */
 
-/* Light theme — "clinical light green": same green family as dark mode,
-   deepened for contrast on white, surfaces tinted green to kill the glare */
-html.light {
-  --color-bg: #eef3ee;
-  --color-bg-panel: #f7faf7;
-  --color-bg-strip: #e4ece4;
-  --color-phosphor: #177245;
-  --color-phosphor-dim: #175c3a;
-  --color-phosphor-bright: #189a52;
-  --color-phosphor-glow: #1772451a;
-  --color-phosphor-rgb: 23, 114, 69;
-  --color-secondary: #0f766e;
-  --color-info: #0284c7;
-  --color-amber: #b45309;
-  --color-amber-dim: #92400e;
-  --color-alarm: #dc2626;
-  --color-alarm-dim: #991b1b;
-  --color-alarm-glow: #dc262626;
-  --color-grid: #d5ded5;
-  --color-muted: #5b6b7f;
-  --text-main: #1e2e25;
-  --text-soft: #33463c;
-  --text-muted: #5b6b7f;
-  --bg-sidebar: #e9efe9;
-  --bg-hover: #e4ece4;
-}
+/* Dark-only ICU theme — there is no light mode. All colors live here as CSS
+   variables so every component pulls from one source of truth. */
 
 :root {
   /* Semantic aliases (theme-aware) */
@@ -118,8 +94,8 @@ body {
   transition: background-color 0.3s ease, color 0.3s ease;
 }
 
-/* Subtle background pulse in dark mode when there's an incident */
-html:not(.light) body::after {
+/* Subtle background pulse when there's an incident */
+body::after {
   content: "";
   position: fixed;
   inset: 0;
@@ -260,10 +236,6 @@ html:not(.light) body::after {
   text-shadow: 0 0 8px var(--color-phosphor-glow);
 }
 
-html.light .live-clock {
-  text-shadow: 0 0 6px var(--color-phosphor-glow);
-}
-
 /* Phosphor text glow utility — use sparingly on hero/header only */
 .text-phosphor-glow {
   text-shadow:
@@ -271,22 +243,10 @@ html.light .live-clock {
     0 0 16px var(--color-phosphor-glow);
 }
 
-html.light .text-phosphor-glow {
-  text-shadow:
-    0 0 4px var(--color-phosphor-glow),
-    0 0 10px var(--color-phosphor-glow);
-}
-
 .text-alarm-glow {
   text-shadow:
     0 0 8px var(--color-alarm-glow),
     0 0 20px var(--color-alarm-glow);
-}
-
-html.light .text-alarm-glow {
-  text-shadow:
-    0 0 6px var(--color-alarm-glow),
-    0 0 14px var(--color-alarm-glow);
 }
 
 /* Panel border — flat ICU bezel, not a card shadow */
@@ -919,24 +879,6 @@ html.light .text-alarm-glow {
   }
 }
 
-html.light .dashboard-monitor {
-  background: rgba(247, 250, 247, 0.92);
-  border-color: rgba(23, 114, 69, 0.25);
-}
-
-html.light .dashboard-monitor:hover {
-  border-color: rgba(23, 114, 69, 0.45);
-}
-
-html.light .dashboard-monitor.strip-alarm {
-  background: rgba(247, 250, 247, 0.92);
-  border-color: rgba(220, 38, 38, 0.25);
-}
-
-html.light .dashboard-monitor.strip-pending {
-  background: rgba(247, 250, 247, 0.92);
-}
-
 .dashboard-monitor:hover {
   border-color: rgba(34, 197, 94, 0.35);
   background: rgba(0, 0, 0, 0.6);
@@ -1046,23 +988,6 @@ html.light .dashboard-monitor.strip-pending {
 
 .management-button-primary:hover:not(:disabled) {
   background: #4ade80;
-}
-
-/* Light mode: primary green deepens, so button text flips to near-white */
-html.light .management-button-primary {
-  color: #f0fdf4;
-}
-
-html.light .management-button-primary:hover:not(:disabled) {
-  background: #16a34a;
-}
-
-html.light .auth-submit {
-  color: #f0fdf4;
-}
-
-html.light .auth-submit:hover:not(:disabled) {
-  background: #16a34a;
 }
 
 .management-button-secondary {
