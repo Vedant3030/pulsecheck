@@ -1,9 +1,8 @@
 "use client";
 
-import { useState } from "react";
-import type { ReactNode } from "react";
+import { useRef, useState } from "react";
 import type { AssertionInput } from "@/lib/api";
-import type { AssertionOperator, AssertionType } from "@/types/monitor";
+import { AssertionComposer, assertionSentence } from "@/components/AssertionComposer";
 
 export interface ChainStepForm {
   id?: string;
@@ -36,14 +35,6 @@ export const EMPTY_CHAIN_STEP: ChainStepForm = {
 
 const BODY_METHODS = ["POST", "PUT", "PATCH"];
 
-const ASSERTION_TYPES: AssertionType[] = ["STATUS_CODE", "RESPONSE_TIME", "BODY_CONTAINS", "JSON_FIELD_EQUALS"];
-const OPERATORS_BY_TYPE: Record<AssertionType, AssertionOperator[]> = {
-  STATUS_CODE: ["EQUALS"],
-  RESPONSE_TIME: ["EQUALS", "LESS_THAN", "GREATER_THAN"],
-  BODY_CONTAINS: ["CONTAINS", "EQUALS"],
-  JSON_FIELD_EQUALS: ["EQUALS", "CONTAINS", "LESS_THAN", "GREATER_THAN"],
-};
-
 function varsAvailableTo(steps: ChainStepForm[], index: number): string[] {
   const out: string[] = [];
   for (let i = 0; i < index; i++) {
@@ -52,61 +43,6 @@ function varsAvailableTo(steps: ChainStepForm[], index: number): string[] {
     }
   }
   return out;
-}
-
-function NewAssertionForm({ onAdd }: { onAdd: (a: AssertionInput) => void }) {
-  const [type, setType] = useState<AssertionType>("STATUS_CODE");
-  const [operator, setOperator] = useState<AssertionOperator>("EQUALS");
-  const [field, setField] = useState("");
-  const [expectedValue, setExpectedValue] = useState("");
-  const operators = OPERATORS_BY_TYPE[type];
-  return (
-    <div className="mt-2 grid gap-2 md:grid-cols-[1fr_1fr_1fr_auto]">
-      <select
-        value={type}
-        onChange={(e) => { const t = e.target.value as AssertionType; setType(t); setOperator(OPERATORS_BY_TYPE[t][0]); }}
-        className="management-control w-full"
-        aria-label="Assertion type"
-      >
-        {ASSERTION_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-      </select>
-      <select
-        value={operator}
-        onChange={(e) => setOperator(e.target.value as AssertionOperator)}
-        className="management-control w-full"
-        aria-label="Assertion operator"
-      >
-        {operators.map((o) => <option key={o} value={o}>{o}</option>)}
-      </select>
-      <input
-        value={type === "JSON_FIELD_EQUALS" ? field : expectedValue}
-        onChange={(e) => (type === "JSON_FIELD_EQUALS" ? setField(e.target.value) : setExpectedValue(e.target.value))}
-        className="management-control w-full"
-        placeholder={type === "JSON_FIELD_EQUALS" ? "field, e.g. data.status" : "expected value"}
-        aria-label={type === "JSON_FIELD_EQUALS" ? "Assertion field" : "Assertion expected value"}
-      />
-      {type === "JSON_FIELD_EQUALS" && (
-        <input
-          value={expectedValue}
-          onChange={(e) => setExpectedValue(e.target.value)}
-          className="management-control w-full"
-          placeholder="expected value"
-          aria-label="Assertion expected value"
-        />
-      )}
-      <button
-        type="button"
-        onClick={() => {
-          onAdd({ type, operator, field: type === "JSON_FIELD_EQUALS" ? field : null, expectedValue });
-          setField("");
-          setExpectedValue("");
-        }}
-        className="text-xs font-medium text-phosphor hover:underline"
-      >
-        + Add rule
-      </button>
-    </div>
-  );
 }
 
 export function ChainStepsEditor({
@@ -118,6 +54,71 @@ export function ChainStepsEditor({
 }) {
   function update(index: number, patch: Partial<ChainStepForm>) {
     onChange(steps.map((s, i) => (i === index ? { ...s, ...patch } : s)));
+  }
+
+  // Clickable variable chips: insert {{name}} into the focused field of the
+  // same step, or copy to clipboard when nothing is focused. Chip mousedown
+  // is cancelled so the input keeps focus (and its cursor position).
+  const fieldRefs = useRef(new Map<string, HTMLInputElement | HTMLTextAreaElement>());
+  const [focusedField, setFocusedField] = useState<string | null>(null);
+  const [chipNote, setChipNote] = useState<{ index: number; text: string } | null>(null);
+  const chipTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function fieldProps(key: string) {
+    return {
+      ref: (el: HTMLInputElement | HTMLTextAreaElement | null) => {
+        if (el) fieldRefs.current.set(key, el);
+        else fieldRefs.current.delete(key);
+      },
+      onFocus: () => setFocusedField(key),
+    };
+  }
+
+  function showChipNote(index: number, text: string) {
+    setChipNote({ index, text });
+    if (chipTimer.current) clearTimeout(chipTimer.current);
+    chipTimer.current = setTimeout(() => setChipNote(null), 2500);
+  }
+
+  function insertToken(stepIndex: number, variable: string) {
+    const token = `{{${variable}}}`;
+    const step = steps[stepIndex];
+    const key =
+      focusedField && focusedField.startsWith(`${stepIndex}:`) ? focusedField : `${stepIndex}:url`;
+    const el = fieldRefs.current.get(key);
+    const field = key.split(":").slice(1).join(":");
+    const current =
+      field === "url" ? step.url
+      : field === "body" ? step.requestBody
+      : field === "auth" ? step.authValue
+      : field.startsWith("header:")
+        ? (step.headers[Number(field.split(":")[1])]?.value ?? "")
+        : null;
+    if (el && current !== null) {
+      const start = el.selectionStart ?? current.length;
+      const end = el.selectionEnd ?? current.length;
+      const next = current.slice(0, start) + token + current.slice(end);
+      if (field === "url") update(stepIndex, { url: next });
+      else if (field === "body") update(stepIndex, { requestBody: next });
+      else if (field === "auth") update(stepIndex, { authValue: next });
+      else {
+        const hi = Number(field.split(":")[1]);
+        update(stepIndex, { headers: step.headers.map((r, i) => (i === hi ? { ...r, value: next } : r)) });
+      }
+      const pos = start + token.length;
+      requestAnimationFrame(() => {
+        el.focus();
+        el.setSelectionRange(pos, pos);
+      });
+      showChipNote(stepIndex, `Inserted ${token}`);
+      return;
+    }
+    try {
+      void navigator.clipboard?.writeText(token);
+      showChipNote(stepIndex, `Copied ${token} — focus a field and click again to insert`);
+    } catch {
+      showChipNote(stepIndex, `Copy this: ${token}`);
+    }
   }
 
   function move(index: number, dir: -1 | 1) {
@@ -158,17 +159,32 @@ export function ChainStepsEditor({
               </div>
               <div className="md:col-span-2">
                 <label className="management-label">URL</label>
-                <input value={step.url} onChange={(e) => update(index, { url: e.target.value })} className="management-control w-full font-mono" placeholder="https://api.example.com/login" spellCheck={false} />
+                <input value={step.url} onChange={(e) => update(index, { url: e.target.value })} {...fieldProps(`${index}:url`)} className="management-control w-full font-mono" placeholder="https://api.example.com/login" spellCheck={false} />
                 {available.length > 0 && (
-                  <p className="mt-1 text-xs text-[var(--text-muted)]">
-                    Available variables: {available.map((v) => <code key={v} className="font-mono text-phosphor">{`{{${v}}}`}</code>).reduce((acc: ReactNode[], el, i) => (i === 0 ? [el] : [...acc, ", ", el]), [])}
-                  </p>
+                  <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                    <span className="text-xs text-[var(--text-muted)]">Insert variable:</span>
+                    {available.map((v) => (
+                      <button
+                        key={v}
+                        type="button"
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => insertToken(index, v)}
+                        title={`Insert {{${v}}} into the focused field`}
+                        className="rounded border border-grid px-1.5 py-0.5 font-mono text-[11px] text-phosphor transition hover:border-phosphor"
+                      >
+                        {`{{${v}}}`}
+                      </button>
+                    ))}
+                    {chipNote && chipNote.index === index && (
+                      <span className="font-mono text-[11px] text-[var(--text-muted)]">{chipNote.text}</span>
+                    )}
+                  </div>
                 )}
               </div>
               {BODY_METHODS.includes(step.method) && (
                 <div className="md:col-span-2">
                   <label className="management-label">JSON body</label>
-                  <textarea value={step.requestBody} onChange={(e) => update(index, { requestBody: e.target.value })} className="management-control w-full font-mono" rows={4} spellCheck={false} />
+                  <textarea value={step.requestBody} onChange={(e) => update(index, { requestBody: e.target.value })} {...fieldProps(`${index}:body`)} className="management-control w-full font-mono" rows={4} spellCheck={false} />
                 </div>
               )}
             </div>
@@ -178,7 +194,7 @@ export function ChainStepsEditor({
               {step.headers.map((row, hi) => (
                 <div key={hi} className="mt-2 flex gap-2">
                   <input value={row.key} onChange={(e) => update(index, { headers: step.headers.map((r, i) => (i === hi ? { ...r, key: e.target.value } : r)) })} className="management-control w-full" placeholder="Header name" aria-label="Header name" />
-                  <input value={row.value} onChange={(e) => update(index, { headers: step.headers.map((r, i) => (i === hi ? { ...r, value: e.target.value } : r)) })} className="management-control w-full" placeholder="Header value — {{variables}} allowed" aria-label="Header value" />
+                  <input value={row.value} onChange={(e) => update(index, { headers: step.headers.map((r, i) => (i === hi ? { ...r, value: e.target.value } : r)) })} {...fieldProps(`${index}:header:${hi}`)} className="management-control w-full" placeholder="Header value — {{variables}} allowed" aria-label="Header value" />
                   <button type="button" onClick={() => update(index, { headers: step.headers.filter((_, i) => i !== hi) })} className="text-xs text-[var(--text-muted)] hover:text-[var(--text-main)]" aria-label="Remove header">✕</button>
                 </div>
               ))}
@@ -207,7 +223,7 @@ export function ChainStepsEditor({
                 {step.hasAuth && !step.authValue && (
                   <p className="mb-2 text-xs text-[var(--text-muted)]">Auth configured (hidden) — leave empty to keep it, or type a new value to replace it.</p>
                 )}
-                <input type="password" value={step.authValue} onChange={(e) => update(index, { authValue: e.target.value })} className="management-control w-full" placeholder={step.hasAuth ? "Leave empty to keep existing" : "Enter secret"} autoComplete="new-password" />
+                <input type="password" value={step.authValue} onChange={(e) => update(index, { authValue: e.target.value })} {...fieldProps(`${index}:auth`)} className="management-control w-full" placeholder={step.hasAuth ? "Leave empty to keep existing" : "Enter secret"} autoComplete="new-password" />
               </div>
             )}
 
@@ -236,11 +252,11 @@ export function ChainStepsEditor({
               <p className="management-label">Step assertions (a step with none passes on 2xx)</p>
               {step.assertions.map((a, ai) => (
                 <div key={ai} className="mt-1 flex items-center gap-2 text-xs">
-                  <code className="font-mono text-[var(--text-main)]">{a.type} {a.operator}{a.field ? ` ${a.field}` : ""} = {a.expectedValue}</code>
+                  <code className="font-mono text-[var(--text-main)]">{assertionSentence(a.type, a.field ?? null, a.operator, a.expectedValue)}</code>
                   <button type="button" onClick={() => update(index, { assertions: step.assertions.filter((_, i) => i !== ai) })} className="text-[var(--text-muted)] hover:text-[var(--text-main)]" aria-label="Remove assertion">✕</button>
                 </div>
               ))}
-              <NewAssertionForm onAdd={(a) => update(index, { assertions: [...step.assertions, a] })} />
+              <AssertionComposer onAdd={(a) => update(index, { assertions: [...step.assertions, a] })} idPrefix={`chain-step-${index}`} />
             </div>
           </section>
         );

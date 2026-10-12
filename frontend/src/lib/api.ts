@@ -181,7 +181,7 @@ export async function fetchMonitorChecks(
   return (await res.json()) as CheckResult[];
 }
 
-export async function createMonitor(input: MonitorInput): Promise<void> {
+export async function createMonitor(input: MonitorInput): Promise<Monitor> {
   const res = await apiFetch("/monitors", {
     method: "POST",
     body: JSON.stringify(input),
@@ -191,6 +191,8 @@ export async function createMonitor(input: MonitorInput): Promise<void> {
   if (!res.ok) {
     throw new Error(await parseError(res));
   }
+
+  return (await res.json()) as Monitor;
 }
 
 export async function updateMonitor(
